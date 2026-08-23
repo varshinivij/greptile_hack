@@ -17,11 +17,12 @@ class JsonlTraceLogger:
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def event(self, name: str, **fields: Any) -> None:
+    def event(self, name: str, level: str = "info", **fields: Any) -> None:
         if not self.path:
             return
         record = {
             "ts": time.time(),
+            "level": level,
             "event": name,
             **fields,
         }

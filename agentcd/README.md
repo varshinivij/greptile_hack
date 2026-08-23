@@ -40,7 +40,9 @@ Override the path with:
 --log-file /tmp/agents-bench.jsonl
 ```
 
-Trace logs include benchmark start/end, worktree paths, version start/end, attempt start/end, status, duration, token totals, and tool-call count. To watch progress while a run is active:
+The CLI appends the invocation timestamp to explicit log files, so that example writes `/tmp/agents-bench-<timestamp>.jsonl`. If `--log-file` points to a directory, the CLI writes `agents-bench-<timestamp>.jsonl` inside it.
+
+Trace logs include CLI start/end, sanitized args, cwd, runner choice, prompt source, prompt length, prompt SHA-256, benchmark start/end, setup progress, worktree paths, version submit/start/end, attempt start/end, parsed attempt metrics, summary creation, status, duration, token totals, and tool-call count. Raw inline prompt text is redacted. To watch progress while a run is active:
 
 ```bash
 tail -f logs/agents-bench-<timestamp>.jsonl

@@ -331,16 +331,38 @@ Promotion decisions use paired deltas and stage-specific sample requirements rat
 
 ## Trace Logs
 
-Each CLI invocation writes a JSONL progress trace by default under `agentcd/logs/`, which is ignored by git. The path can be overridden with `--log-file`.
+Each CLI invocation writes a JSONL progress trace by default under `agentcd/logs/`, which is ignored by git.
+
+Default path:
+
+```text
+logs/agents-bench-<timestamp>.jsonl
+```
+
+The path can be overridden with `--log-file`. Explicit log file paths also receive the invocation timestamp before the suffix, so `--log-file logs/run.jsonl` writes `logs/run-<timestamp>.jsonl`. If `--log-file` points to a directory, the CLI writes `agents-bench-<timestamp>.jsonl` inside it.
 
 Current events include:
 
-- benchmark start and end
-- resolved commits and created worktree paths
-- version start and end
-- attempt start and end
+- CLI start/end
+- sanitized argv
+- invocation cwd
+- runner choice
+- prompt source
+- prompt length
+- prompt SHA-256
+- benchmark start/end
+- setup progress
+- resolved commits
+- created worktree paths
+- version submission and result collection
+- version start/end
+- attempt start/end
+- parsed attempt metrics
+- summary creation
 - attempt status
 - total tokens, duration, and tool-call count
+
+Raw inline prompt text is redacted from logs.
 
 The logger serializes concurrent writes from the A and B threads. These logs make long-running local benchmarks observable, but they are not the durable benchmark artifact or the policy evidence contract. The future worker attaches or ingests them under the corresponding job.
 

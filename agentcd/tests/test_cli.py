@@ -74,6 +74,54 @@ class CliTest(unittest.TestCase):
             self.assertIn("tool_call_count", result["runs"][0]["summary"])
             self.assertTrue(result["execution"]["version_runs_concurrent"])
 
+    def test_cli_writes_debug_log_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            log_file = Path(temp) / "logs" / "run.jsonl"
+            init_fixture_repo(project)
+
+            output = capture_stdout(
+                [
+                    "--project",
+                    str(project),
+                    "--commit-a",
+                    "HEAD",
+                    "--commit-b",
+                    "HEAD",
+                    "--prompt",
+                    "Do not write this raw prompt into logs.",
+                    "--runs",
+                    "1",
+                    "--runner",
+                    "mock",
+                    "--json-only",
+                    "--log-file",
+                    str(log_file),
+                ]
+            )
+
+            result = json.loads(output)
+            actual_log_file = Path(result["log_file"])
+            self.assertEqual(actual_log_file.parent, log_file.parent.resolve())
+            self.assertTrue(actual_log_file.name.startswith("run-"))
+            self.assertEqual(actual_log_file.suffix, ".jsonl")
+            records = [json.loads(line) for line in actual_log_file.read_text(encoding="utf-8").splitlines()]
+            events = [record["event"] for record in records]
+            self.assertIn("cli_start", events)
+            self.assertIn("worktrees_created", events)
+            self.assertIn("attempt_start", events)
+            self.assertIn("attempt_metrics_parsed", events)
+            self.assertIn("attempt_end", events)
+            self.assertIn("summaries_created", events)
+            self.assertIn("cli_end", events)
+
+            cli_start = next(record for record in records if record["event"] == "cli_start")
+            self.assertEqual(cli_start["prompt_source"], "inline")
+            self.assertEqual(cli_start["prompt_chars"], 39)
+            self.assertEqual(cli_start["level"], "info")
+            self.assertNotIn("Do not write", actual_log_file.read_text(encoding="utf-8"))
+            self.assertIn("<redacted>", cli_start["argv"])
+
 
 class OrchestrationTest(unittest.TestCase):
     def test_versions_run_concurrently(self) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +11,7 @@ from pathlib import Path
 from .codex_client import CodexExecRunner, MockCodexRunner
 from .output import comparison_table
 from .service import BenchmarkConfig, run_benchmark
+from .tracing import JsonlTraceLogger
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,25 +56,52 @@ def main(argv: list[str] | None = None) -> int:
     if args.runs < 1:
         parser.error("--runs must be at least 1")
 
+    invocation_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_file = resolve_log_file(args.log_file, invocation_timestamp)
+    logger = JsonlTraceLogger(log_file)
+    prompt = read_prompt(args)
+    prompt_source = "inline" if args.prompt is not None else str(Path(args.prompt_file).expanduser().resolve())
+    logger.event(
+        "cli_start",
+        argv=sanitize_argv(argv if argv is not None else sys.argv[1:]),
+        invocation_timestamp=invocation_timestamp,
+        cwd=os.getcwd(),
+        project=str(Path(args.project).resolve()),
+        commit_a=args.commit_a,
+        commit_b=args.commit_b,
+        runs=args.runs,
+        runner=args.runner,
+        model=args.model,
+        codex_command=args.codex_command if args.runner == "codex" else None,
+        keep_worktrees=args.keep_worktrees,
+        json_only=args.json_only,
+        prompt_source=prompt_source,
+        prompt_chars=len(prompt),
+        prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        log_file=str(log_file),
+    )
+
     runner = (
         MockCodexRunner(model=args.model)
         if args.runner == "mock"
         else CodexExecRunner(command=args.codex_command, model=args.model)
     )
+    logger.event("runner_created", runner=args.runner, model=args.model)
 
     config = BenchmarkConfig(
         project=Path(args.project).resolve(),
         commit_a=args.commit_a,
         commit_b=args.commit_b,
-        prompt=read_prompt(args),
+        prompt=prompt,
         runs=args.runs,
         keep_worktrees=args.keep_worktrees,
-        log_file=resolve_log_file(args.log_file),
+        log_file=log_file,
     )
 
     try:
         result = run_benchmark(config, runner)
     except Exception as exc:
+        logger.event("cli_error", error_type=type(exc).__name__, error=str(exc))
         print(json.dumps({"status": "error", "error": str(exc)}, indent=2), file=sys.stderr)
         return 1
 
@@ -79,11 +109,28 @@ def main(argv: list[str] | None = None) -> int:
     if not args.json_only:
         print()
         print(comparison_table(result))
+    logger.event("cli_output_written", json_only=args.json_only)
+    logger.event("cli_end", status="success")
     return 0
 
 
-def resolve_log_file(log_file: str | None) -> Path:
+def resolve_log_file(log_file: str | None, timestamp: str | None = None) -> Path:
+    timestamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if log_file:
-        return Path(log_file).expanduser().resolve()
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = Path(log_file).expanduser()
+        if path.suffix:
+            path = path.with_name(f"{path.stem}-{timestamp}{path.suffix}")
+        else:
+            path = path / f"agents-bench-{timestamp}.jsonl"
+        return path.resolve()
     return (Path.cwd() / "logs" / f"agents-bench-{timestamp}.jsonl").resolve()
+
+
+def sanitize_argv(argv: list[str]) -> list[str]:
+    sanitized = list(argv)
+    for index, value in enumerate(sanitized):
+        if value == "--prompt" and index + 1 < len(sanitized):
+            sanitized[index + 1] = "<redacted>"
+        elif value.startswith("--prompt="):
+            sanitized[index] = "--prompt=<redacted>"
+    return sanitized
