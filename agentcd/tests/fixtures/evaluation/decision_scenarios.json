@@ -1,0 +1,87 @@
+{
+  "base_evidence": "healthy_evidence.json",
+  "policy_config": "offline_policy.json",
+  "cases": [
+    {
+      "name": "promote_healthy_candidate",
+      "expected_action": "promote",
+      "replacements": []
+    },
+    {
+      "name": "hold_missing_greptile",
+      "expected_action": "hold",
+      "replacements": [
+        {
+          "path": ["pairs", 0, "candidate", "greptile", "status"],
+          "value": "unavailable"
+        },
+        {
+          "path": ["pairs", 0, "candidate", "greptile", "findings"],
+          "value": []
+        }
+      ]
+    },
+    {
+      "name": "reject_critical_finding",
+      "expected_action": "reject",
+      "replacements": [
+        {
+          "path": ["pairs", 0, "candidate", "greptile", "findings"],
+          "value": [
+            {
+              "finding_id": "candidate-critical-fixture",
+              "severity": "critical",
+              "category": "security",
+              "file_path": "demo/auth.py"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "reject_quality_regression",
+      "expected_action": "reject",
+      "replacements": [
+        {
+          "path": ["pairs", 1, "candidate", "deterministic_result"],
+          "value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "reject_efficiency_regression",
+      "expected_action": "reject",
+      "replacements": [
+        {
+          "path": ["pairs", 0, "candidate", "metrics", "total_tokens"],
+          "value": 3000
+        }
+      ]
+    },
+    {
+      "name": "review_conflicting_evaluators",
+      "expected_action": "human_review",
+      "replacements": [
+        {
+          "path": ["pairs", 0, "baseline", "deterministic_result"],
+          "value": "failed"
+        },
+        {
+          "path": ["pairs", 0, "baseline", "greptile", "findings"],
+          "value": []
+        },
+        {
+          "path": ["pairs", 0, "candidate", "greptile", "findings"],
+          "value": [
+            {
+              "finding_id": "candidate-medium-fixture",
+              "severity": "medium",
+              "category": "maintainability",
+              "file_path": "demo/file_a.py"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

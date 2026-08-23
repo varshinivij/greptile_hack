@@ -1,0 +1,116 @@
+{
+  "schema_version": "agentcd.evaluation.evidence/v1",
+  "baseline_version": "baseline-agents-v1",
+  "candidate_version": "candidate-agents-v2",
+  "stage": "offline",
+  "suite_version": "hugodocs-demo-suite/v1",
+  "observation_duration_seconds": 120,
+  "objective": {
+    "metric": "total_tokens"
+  },
+  "pairs": [
+    {
+      "pair_id": "pair-bug-fix-1",
+      "task_id": "hugodocs-bug-fix-1",
+      "segment": "bug_fixing",
+      "output_type": "code",
+      "baseline": {
+        "attempt_id": "baseline-bug-fix-1",
+        "source_revision": "hugodocs-demo-source-1",
+        "prompt_hash": "prompt-bug-fix-1",
+        "model": "codex-test-model",
+        "runner": "codex-cli/v1",
+        "tool_policy": "sandbox/v1",
+        "execution_status": "success",
+        "deterministic_result": "passed",
+        "greptile": {
+          "status": "completed",
+          "findings": [
+            {
+              "finding_id": "baseline-medium-1",
+              "severity": "medium",
+              "category": "maintainability",
+              "file_path": "demo/file_a.py"
+            }
+          ]
+        },
+        "metrics": {
+          "duration_ms": 1000,
+          "total_tokens": 1000,
+          "tool_call_count": 4,
+          "estimated_cost_usd": 0.1
+        },
+        "policy_violations": []
+      },
+      "candidate": {
+        "attempt_id": "candidate-bug-fix-1",
+        "source_revision": "hugodocs-demo-source-1",
+        "prompt_hash": "prompt-bug-fix-1",
+        "model": "codex-test-model",
+        "runner": "codex-cli/v1",
+        "tool_policy": "sandbox/v1",
+        "execution_status": "success",
+        "deterministic_result": "passed",
+        "greptile": {
+          "status": "completed",
+          "findings": []
+        },
+        "metrics": {
+          "duration_ms": 900,
+          "total_tokens": 850,
+          "tool_call_count": 4,
+          "estimated_cost_usd": 0.085
+        },
+        "policy_violations": []
+      }
+    },
+    {
+      "pair_id": "pair-testing-1",
+      "task_id": "hugodocs-testing-1",
+      "segment": "testing",
+      "output_type": "code",
+      "baseline": {
+        "attempt_id": "baseline-testing-1",
+        "source_revision": "hugodocs-demo-source-1",
+        "prompt_hash": "prompt-testing-1",
+        "model": "codex-test-model",
+        "runner": "codex-cli/v1",
+        "tool_policy": "sandbox/v1",
+        "execution_status": "success",
+        "deterministic_result": "passed",
+        "greptile": {
+          "status": "completed",
+          "findings": []
+        },
+        "metrics": {
+          "duration_ms": 1200,
+          "total_tokens": 1200,
+          "tool_call_count": 6,
+          "estimated_cost_usd": 0.12
+        },
+        "policy_violations": []
+      },
+      "candidate": {
+        "attempt_id": "candidate-testing-1",
+        "source_revision": "hugodocs-demo-source-1",
+        "prompt_hash": "prompt-testing-1",
+        "model": "codex-test-model",
+        "runner": "codex-cli/v1",
+        "tool_policy": "sandbox/v1",
+        "execution_status": "success",
+        "deterministic_result": "passed",
+        "greptile": {
+          "status": "completed",
+          "findings": []
+        },
+        "metrics": {
+          "duration_ms": 1050,
+          "total_tokens": 1000,
+          "tool_call_count": 5,
+          "estimated_cost_usd": 0.1
+        },
+        "policy_violations": []
+      }
+    }
+  ]
+}

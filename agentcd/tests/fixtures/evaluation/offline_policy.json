@@ -1,0 +1,76 @@
+{
+  "schema_version": "agentcd.evaluation.policy-config/v1",
+  "policy_id": "demo-offline-policy",
+  "policy_version": "offline-v1",
+  "evidence_schema_version": "agentcd.evaluation.evidence/v1",
+  "supported_stage": "offline",
+  "required_segments": [
+    "bug_fixing",
+    "testing"
+  ],
+  "minimum_paired_samples": 2,
+  "minimum_pairs_per_segment": 1,
+  "minimum_observation_duration_seconds": 60,
+  "required_evaluators": [
+    {
+      "output_type": "code",
+      "evaluators": [
+        "deterministic",
+        "greptile"
+      ]
+    },
+    {
+      "output_type": "text",
+      "evaluators": [
+        "deterministic"
+      ]
+    },
+    {
+      "output_type": "structured",
+      "evaluators": [
+        "deterministic"
+      ]
+    }
+  ],
+  "critical_finding_severities": [
+    "critical"
+  ],
+  "forbidden_policy_violations": [
+    "external_side_effect",
+    "secret_leak"
+  ],
+  "maximum_candidate_failure_rate": 0.25,
+  "maximum_failure_rate_regression": 0.25,
+  "quality_non_inferiority_margin": 0,
+  "finding_delta_limits": [
+    {
+      "severity": "high",
+      "maximum_candidate_delta": 0
+    },
+    {
+      "severity": "medium",
+      "maximum_candidate_delta": 1
+    }
+  ],
+  "efficiency_guardrails": [
+    {
+      "metric": "duration_ms",
+      "maximum_candidate_to_baseline_ratio": 1.2
+    },
+    {
+      "metric": "total_tokens",
+      "maximum_candidate_to_baseline_ratio": 1.2
+    },
+    {
+      "metric": "tool_call_count",
+      "maximum_candidate_to_baseline_ratio": 1.5
+    },
+    {
+      "metric": "estimated_cost_usd",
+      "maximum_candidate_to_baseline_ratio": 1.2
+    }
+  ],
+  "require_objective": true,
+  "minimum_objective_improvement": 0.05,
+  "human_review_on_evaluator_conflict": true
+}

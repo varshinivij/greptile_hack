@@ -113,3 +113,20 @@ python -m agentcd_bench \
 AgentCD resets each evaluated attempt to its starting commit, captures its patch and changed files, creates an unpushed temporary commit and branch, calls `POST /evaluations` once for the candidate/baseline pair, includes the complete response under `evaluations`, and deletes the temporary branches after the response returns.
 
 The `codex` runner shells out to `codex exec --json --ephemeral --cd <worktree>`, closes inherited stdin, parses JSONL events when available, and always records status and wall-clock duration.
+
+## Offline Evaluation Policy
+
+`agentcd_bench.evaluation` is the deterministic policy boundary that decides whether normalized offline evidence is eligible for shadow traffic. It performs no network, filesystem, Git, Greptile, database, or routing operations.
+
+AgentCD calls the payload entrypoint after its deterministic checks and Greptile adapter have produced named baseline/candidate evidence:
+
+```python
+from agentcd_bench.evaluation import evaluate_policy_payload
+
+decision = evaluate_policy_payload(evidence_payload, policy_config_payload)
+result = decision.to_dict()
+```
+
+The contracts reject unknown schema or policy versions. Valid but incomplete evaluator data produces `hold`; configured critical findings or forbidden side effects produce `reject`. The offline-v1 policy can return `promote`, `hold`, `reject`, or `human_review`, but never changes traffic itself.
+
+Canonical payloads are in `tests/fixtures/evaluation/healthy_evidence.json` and `tests/fixtures/evaluation/offline_policy.json`. The thresholds in that policy are demo fixtures, not calibrated production defaults.
