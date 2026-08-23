@@ -26,7 +26,7 @@ This plan distinguishes what is implemented in this repository from integration 
 | Prompt data | Seed instructions and 1,000 synthetic prompt records exist | Curate runnable tasks and bind them to repositories, setup, and expected checks |
 | Demo repository | `hugoDocs` points at the fork intended for the product demo, but the repository has no `.gitmodules` mapping | Make the demo checkout reproducible and curate its first runnable tasks and deterministic checks |
 | FastAPI Greptile service | `service/` implements synchronous `POST /evaluations`, concurrently reviews both exact commits, and preserves independent success/failure results | Stabilize the raw response contract and publish captured Greptile response fixtures |
-| AgentCD-to-FastAPI integration | Evaluator-enabled benchmark runs create exact temporary refs, call `POST /evaluations` once per paired run, retain the raw response, and remove the refs afterward | Normalize the response with benchmark artifacts, invoke the policy, and return both evidence and decision |
+| AgentCD-to-FastAPI integration | With an explicit policy snapshot, evaluator-enabled benchmark runs normalize each raw paired response with attempt metrics, invoke the policy, return evidence and decision, and write deterministic Markdown | Add deterministic task-check execution, captured Greptile fixtures, and a versioned benchmark artifact contract |
 | Offline evaluation policy | `agentcd_bench.evaluation` implements versioned contracts, configurable gates, deterministic decisions, and replayable fixtures | Add the adapter from benchmark and FastAPI outputs, then calibrate non-demo thresholds |
 | Routing | Not present; neither the policy nor prose report changes traffic | Add only after trustworthy offline and shadow evidence exists |
 
@@ -172,7 +172,7 @@ The exact call sequence is:
 8. AgentCD may invoke the advisory report renderer with that decision and its evidence. A report failure does not change the decision.
 9. A rollout controller may apply the structured policy decision later when separately implemented and authorized. It never consumes prose as authorization.
 
-Current `main` implements steps 1-5 for evaluator-enabled runs. `hashim-eval` implements step 7 once normalized evidence is supplied. Step 6 and the wiring from step 6 into step 7 are the immediate integration gap; steps 8-9 remain downstream work.
+Current `main` implements steps 1-8 for evaluator-enabled runs when an explicit policy configuration is supplied. The adapter maps A to candidate and B to baseline, verifies evaluator commit provenance, normalizes Greptile comments and attempt metrics, invokes the policy, and produces deterministic Markdown. Deterministic task checks are still upstream work; until an attempt supplies them, policies that require that evaluator correctly hold for missing evidence. Step 9 remains downstream work.
 
 The HTTP call intentionally waits for both Greptile reviews. There is no queue, durable job API, webhook API, database, or background worker in this version. AgentCD must call the endpoint before its worktrees and temporary evaluation branches disappear.
 
@@ -479,7 +479,7 @@ The evaluation policy only recommends the next action. A separately authorized r
 
 ## State
 
-The current version has no server-side persistence or durable job state. AgentCD owns the invocation lifecycle and currently records benchmark artifacts, raw Greptile responses, and trace logs before cleaning up temporary refs. Normalized evidence and the policy decision still need to be added to its result contract.
+The current version has no server-side persistence or durable job state. AgentCD owns the invocation lifecycle and records benchmark artifacts, raw Greptile responses, normalized evidence, the policy decision, the deterministic Markdown report path, and trace logs before cleaning up temporary refs when policy evaluation is enabled.
 
 Future rollout state remains separate from benchmark execution:
 
@@ -598,10 +598,10 @@ Diff capture includes untracked files by marking them intent-to-add in the tempo
 
 - AgentCD now calls the single synchronous `POST /evaluations` endpoint before each paired attempt's worktrees and temporary refs are removed.
 - It sends both exact generated commits in one request and retains the complete raw response.
-- Normalize baseline and candidate Greptile results with deterministic evaluator output.
+- AgentCD now normalizes named baseline and candidate Greptile results with per-attempt metrics; deterministic task-check execution remains.
 - The versioned offline evaluation policy, payload parser, six gates, decision coordinator, and replay fixtures are implemented on `hashim-eval`.
 - Use the `hashim-eval` normalized evidence contract and saved policy fixtures as the integration boundary.
-- Return an explainable offline decision: promote to shadow, hold, reject, or require human review.
+- AgentCD now returns an explainable offline decision and deterministic Markdown artifact when given a policy snapshot.
 - Adapt `agentcd-report` to render that structured decision downstream without becoming a second decision engine.
 
 ### Phase 3: Evaluation Integration
@@ -624,7 +624,7 @@ Diff capture includes untracked files by marking them intent-to-add in the tempo
 
 Current validation:
 
-- From `agentcd/`, `python3 -m unittest discover -s tests` runs thirty tests and passes: seven CLI/orchestration tests and twenty-three policy tests.
+- From `agentcd/`, `python3 -m unittest discover -s tests` runs forty-five tests and passes, including policy, evidence-adapter, Markdown-renderer, and end-to-end CLI integration coverage.
 - From `service/`, `pytest` runs four FastAPI tests covering concurrent evaluation, independent failures, and request validation.
 - `ruff check agentcd_bench/evaluation tests/test_evaluation_policy.py` passes.
 - Saved JSON scenarios replay every offline-v1 action: promote, hold, reject, and human review.
