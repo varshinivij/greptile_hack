@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .codex_client import CodexExecRunner, MockCodexRunner
+from .evaluation import ContractError, parse_policy_config
+from .evaluation.models import ObjectiveMetric, OutputType
 from .output import compact_result, comparison_table, verbose_result
 from .service import BenchmarkConfig, run_benchmark
 from .tracing import JsonlTraceLogger
@@ -58,6 +60,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=700.0,
         help="Evaluation service HTTP timeout in seconds. Default: 700.",
     )
+    parser.add_argument(
+        "--policy-config",
+        help="Policy configuration JSON. Requires --evaluator-url and enables a decision.",
+    )
+    parser.add_argument("--task-id", default="ad-hoc-task", help="Task identifier used in policy evidence.")
+    parser.add_argument(
+        "--suite-version",
+        default="ad-hoc-suite/v1",
+        help="Task-suite version used in policy evidence.",
+    )
+    parser.add_argument("--segment", default="general", help="Task segment used in policy evidence.")
+    parser.add_argument(
+        "--output-type",
+        choices=[value.value for value in OutputType],
+        default=OutputType.CODE.value,
+        help="Task output type used to select required evaluators. Default: code.",
+    )
+    parser.add_argument(
+        "--objective",
+        choices=[value.value for value in ObjectiveMetric],
+        help="Optional candidate objective metric.",
+    )
+    parser.add_argument(
+        "--decision-report",
+        help="Markdown decision path. Defaults beside the trace log when policy evaluation is enabled.",
+    )
     return parser
 
 
@@ -73,6 +101,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.runs < 1:
         parser.error("--runs must be at least 1")
+    if args.policy_config and not args.evaluator_url:
+        parser.error("--policy-config requires --evaluator-url")
+    if args.decision_report and not args.policy_config:
+        parser.error("--decision-report requires --policy-config")
+
+    policy_config = None
+    if args.policy_config:
+        try:
+            policy_payload = json.loads(
+                Path(args.policy_config).read_text(encoding="utf-8")
+            )
+            policy_config = parse_policy_config(policy_payload)
+        except (OSError, json.JSONDecodeError, ContractError) as exc:
+            parser.error(f"cannot load --policy-config: {exc}")
 
     invocation_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_file = resolve_log_file(args.log_file, invocation_timestamp)
@@ -100,6 +142,12 @@ def main(argv: list[str] | None = None) -> int:
         prompt_chars=len(prompt),
         prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         log_file=str(log_file),
+        policy_config=args.policy_config,
+        task_id=args.task_id,
+        suite_version=args.suite_version,
+        segment=args.segment,
+        output_type=args.output_type,
+        objective=args.objective,
     )
 
     runner = (
@@ -120,6 +168,14 @@ def main(argv: list[str] | None = None) -> int:
         evaluator_url=args.evaluator_url,
         evaluator_timeout_seconds=args.evaluator_timeout,
         base_branch=args.base_branch,
+        policy_config=policy_config,
+        task_id=args.task_id,
+        suite_version=args.suite_version,
+        segment=args.segment,
+        output_type=OutputType(args.output_type),
+        objective_metric=ObjectiveMetric(args.objective) if args.objective else None,
+        runner_id="mock-codex/v1" if args.runner == "mock" else "codex-cli/v1",
+        tool_policy="mock-read/v1" if args.runner == "mock" else "workspace-write/v1",
     )
 
     try:
@@ -128,6 +184,26 @@ def main(argv: list[str] | None = None) -> int:
         logger.event("cli_error", error_type=type(exc).__name__, error=str(exc))
         print(json.dumps({"status": "error", "error": str(exc)}, indent=2), file=sys.stderr)
         return 1
+
+    decision_markdown = result.pop("decision_markdown", None)
+    if isinstance(decision_markdown, str):
+        report_path = resolve_decision_report(args.decision_report, log_file)
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(decision_markdown, encoding="utf-8")
+        except OSError as exc:
+            result["decision_report"] = {
+                "status": "failure",
+                "path": str(report_path),
+                "error": str(exc),
+            }
+            logger.event("decision_report_error", path=str(report_path), error=str(exc))
+        else:
+            result["decision_report"] = {
+                "status": "written",
+                "path": str(report_path),
+            }
+            logger.event("decision_report_written", path=str(report_path))
 
     output_result = verbose_result(result) if args.verbose else compact_result(result)
     print(json.dumps(output_result, indent=2))
@@ -149,6 +225,12 @@ def resolve_log_file(log_file: str | None, timestamp: str | None = None) -> Path
             path = path / f"agents-bench-{timestamp}.jsonl"
         return path.resolve()
     return (Path.cwd() / "logs" / f"agents-bench-{timestamp}.jsonl").resolve()
+
+
+def resolve_decision_report(report_file: str | None, log_file: Path) -> Path:
+    if report_file:
+        return Path(report_file).expanduser().resolve()
+    return log_file.with_name(f"{log_file.stem}.decision.md")
 
 
 def sanitize_argv(argv: list[str]) -> list[str]:

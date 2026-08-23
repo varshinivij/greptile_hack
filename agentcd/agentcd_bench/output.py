@@ -42,6 +42,9 @@ def compact_result(result: dict[str, Any]) -> dict[str, Any]:
         "run_count": result.get("run_count"),
         "log_file": result.get("log_file"),
         "execution": result.get("execution"),
+        "evidence": result.get("evidence"),
+        "decision": result.get("decision"),
+        "decision_report": result.get("decision_report"),
         "runs": [],
     }
     for run in result.get("runs", []):

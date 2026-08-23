@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from .codex_client import RunContext, Runner
+from .evaluation.models import ObjectiveMetric, OutputType, PolicyConfig
+from .evaluation.output import decision_report_markdown
+from .evaluation.policy import evaluate_policy
+from .evidence_adapter import build_evaluation_evidence
 from .evaluator_client import EvaluationClient
 from .git_worktrees import WorktreeManager, git
 from .metrics import summarize_attempts
@@ -26,6 +31,14 @@ class BenchmarkConfig:
     evaluator_url: str | None = None
     evaluator_timeout_seconds: float = 700.0
     base_branch: str = "main"
+    policy_config: PolicyConfig | None = None
+    task_id: str = "ad-hoc-task"
+    suite_version: str = "ad-hoc-suite/v1"
+    segment: str = "general"
+    output_type: OutputType = OutputType.CODE
+    objective_metric: ObjectiveMetric | None = None
+    runner_id: str = "unknown-runner"
+    tool_policy: str = "unknown-tool-policy"
 
 
 def run_benchmark(config: BenchmarkConfig, runner: Runner) -> dict[str, Any]:
@@ -121,6 +134,47 @@ def run_benchmark(config: BenchmarkConfig, runner: Runner) -> dict[str, Any]:
                         status=evaluation.get("status", "success"),
                     )
 
+            evidence_payload = None
+            decision_payload = None
+            decision_markdown = None
+            if config.policy_config:
+                if not evaluations:
+                    raise ValueError(
+                        "policy evaluation requires raw Greptile evaluations"
+                    )
+                candidate_source, baseline_source = resolve_source_revisions(
+                    config.project,
+                    worktrees.commit_a,
+                    worktrees.commit_b,
+                )
+                evidence = build_evaluation_evidence(
+                    raw_evaluations=evaluations,
+                    candidate_attempts=attempts_a,
+                    baseline_attempts=attempts_b,
+                    candidate_version=worktrees.commit_a,
+                    baseline_version=worktrees.commit_b,
+                    candidate_source_revision=candidate_source,
+                    baseline_source_revision=baseline_source,
+                    prompt_hash=hashlib.sha256(config.prompt.encode("utf-8")).hexdigest(),
+                    task_id=config.task_id,
+                    suite_version=config.suite_version,
+                    segment=config.segment,
+                    output_type=config.output_type,
+                    runner=config.runner_id,
+                    tool_policy=config.tool_policy,
+                    objective_metric=config.objective_metric,
+                )
+                report = evaluate_policy(evidence, config.policy_config)
+                evidence_payload = asdict(evidence)
+                decision_payload = report.to_dict()
+                decision_markdown = decision_report_markdown(report)
+                logger.event(
+                    "policy_evaluated",
+                    action=report.action.value,
+                    reason_codes=[reason.value for reason in report.reason_codes],
+                    paired_samples=report.paired_sample_count,
+                )
+
             result = {
                 "project": str(config.project),
                 "run_count": config.runs,
@@ -131,6 +185,9 @@ def run_benchmark(config: BenchmarkConfig, runner: Runner) -> dict[str, Any]:
                     "evaluation_service": config.evaluator_url,
                 },
                 "evaluations": evaluations,
+                "evidence": evidence_payload,
+                "decision": decision_payload,
+                "decision_markdown": decision_markdown,
                 "runs": [
                     {
                         "version": "a",
@@ -330,3 +387,31 @@ def run_git(cwd: Path, *args: str) -> dict[str, Any]:
         "stdout": proc.stdout,
         "stderr": proc.stderr.strip(),
     }
+
+
+def resolve_source_revisions(
+    project: Path, candidate_commit: str, baseline_commit: str
+) -> tuple[str, str]:
+    repository_root = Path(
+        git(project, "rev-parse", "--show-toplevel").strip()
+    ).resolve()
+    project_relative = project.resolve().relative_to(repository_root)
+    agents_path = (project_relative / "AGENTS.md").as_posix()
+    changed_paths = {
+        path
+        for path in git(
+            project,
+            "diff",
+            "--name-only",
+            baseline_commit,
+            candidate_commit,
+        ).splitlines()
+        if path
+    }
+    if changed_paths.issubset({agents_path}):
+        merge_base = git(
+            project, "merge-base", baseline_commit, candidate_commit
+        ).strip()
+        shared_revision = f"{merge_base}:source-excluding-{agents_path}"
+        return shared_revision, shared_revision
+    return candidate_commit, baseline_commit

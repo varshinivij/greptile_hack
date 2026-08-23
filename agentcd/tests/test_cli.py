@@ -297,6 +297,78 @@ class CliTest(unittest.TestCase):
             self.assertTrue(next(record for record in records if record["event"] == "cli_start")["verbose"])
             self.assertTrue(next(record for record in records if record["event"] == "cli_output_written")["verbose"])
 
+    def test_cli_normalizes_evidence_decides_and_writes_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            init_fixture_repo(project)
+            policy_path = Path(temp) / "policy.json"
+            report_path = Path(temp) / "decision.md"
+            policy = json.loads(
+                (
+                    Path(__file__).parent
+                    / "fixtures"
+                    / "evaluation"
+                    / "offline_policy.json"
+                ).read_text(encoding="utf-8")
+            )
+            policy["required_segments"] = ["general"]
+            policy["minimum_paired_samples"] = 1
+            policy["minimum_observation_duration_seconds"] = 0
+            policy["required_evaluators"] = [
+                {"output_type": "code", "evaluators": ["greptile"]}
+            ]
+            policy["efficiency_guardrails"] = []
+            policy["require_objective"] = False
+            write_file(policy_path, json.dumps(policy))
+
+            def evaluation_response(payload: dict[str, object]) -> dict[str, object]:
+                return {
+                    "evaluations": {
+                        "a": {
+                            "status": "success",
+                            "commit_id": payload["commit_a"],
+                            "greptile_output": {"comments": []},
+                        },
+                        "b": {
+                            "status": "success",
+                            "commit_id": payload["commit_b"],
+                            "greptile_output": {"comments": []},
+                        },
+                    }
+                }
+
+            with patch(
+                "agentcd_bench.service.EvaluationClient.evaluate_pair",
+                side_effect=evaluation_response,
+            ):
+                output = capture_stdout(
+                    [
+                        "--project",
+                        str(project),
+                        "--commit-a",
+                        "HEAD",
+                        "--commit-b",
+                        "HEAD",
+                        "--prompt",
+                        "Explain the codebase.",
+                        "--runner",
+                        "mock",
+                        "--json-only",
+                        "--evaluator-url",
+                        "http://127.0.0.1:8000",
+                        "--policy-config",
+                        str(policy_path),
+                        "--decision-report",
+                        str(report_path),
+                    ]
+                )
+
+            result = json.loads(output)
+            self.assertEqual(result["decision"]["action"], "promote")
+            self.assertEqual(result["evidence"]["pairs"][0]["task_id"], "ad-hoc-task")
+            self.assertEqual(result["decision_report"]["status"], "written")
+            self.assertTrue(report_path.read_text(encoding="utf-8").startswith("# AgentCD Decision: ✅ PROMOTE"))
+
     def test_attempt_log_includes_git_diff_when_runner_changes_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = Path(temp) / "repo"
