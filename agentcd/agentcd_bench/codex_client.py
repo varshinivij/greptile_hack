@@ -108,12 +108,16 @@ def parse_codex_jsonl(stdout: str) -> dict[str, Any]:
             entry["count"] += 1
             entry["duration_ms"] += find_duration_ms(event)
 
+    input_tokens = llm_metrics.get("input_tokens", 0)
+    output_tokens = llm_metrics.get("output_tokens", 0)
+    total_tokens = llm_metrics.get("total_tokens") or input_tokens + output_tokens
+
     return {
         "llm_metrics": {
             "model": llm_metrics.get("model"),
-            "input_tokens": llm_metrics.get("input_tokens", 0),
-            "output_tokens": llm_metrics.get("output_tokens", 0),
-            "total_tokens": llm_metrics.get("total_tokens", 0),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
             "reasoning_tokens": llm_metrics.get("reasoning_tokens", 0),
             "cached_input_tokens": llm_metrics.get("cached_input_tokens", 0),
         },
