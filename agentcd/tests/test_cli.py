@@ -149,6 +149,41 @@ class OrchestrationTest(unittest.TestCase):
             self.assertEqual(len(result["runs"]), 2)
             self.assertGreaterEqual(runner.max_active, 2)
 
+    def test_commits_outputs_calls_evaluator_and_cleans_temporary_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            init_fixture_repo(project)
+            starting_commit = git(project, "rev-parse", "HEAD").strip()
+            response = {"evaluations": {"a": {"status": "success"}, "b": {"status": "success"}}}
+
+            with patch(
+                "agentcd_bench.service.EvaluationClient.evaluate_pair",
+                return_value=response,
+            ) as evaluate_pair:
+                result = run_benchmark(
+                    BenchmarkConfig(
+                        project=project,
+                        commit_a=starting_commit,
+                        commit_b=starting_commit,
+                        prompt="Rename the function.",
+                        runs=1,
+                        evaluator_url="http://127.0.0.1:8000",
+                        base_branch="master",
+                    ),
+                    FileChangingRunner(),
+                )
+
+            payload = evaluate_pair.call_args.args[0]
+            self.assertEqual(payload["repo"], str(project))
+            self.assertEqual(payload["base_branch"], "master")
+            self.assertNotEqual(payload["commit_a"], starting_commit)
+            self.assertNotEqual(payload["commit_b"], starting_commit)
+            self.assertEqual(result["evaluations"][0]["result"], response)
+            self.assertTrue(result["runs"][0]["attempts"][0]["artifact"]["has_changes"])
+
+            branches = git(project, "branch", "--list", "agentcd-eval/*")
+            self.assertEqual(branches.strip(), "")
+
 
 class CodexRunnerTest(unittest.TestCase):
     def test_codex_exec_uses_fresh_context_and_closed_stdin(self) -> None:
@@ -242,6 +277,25 @@ class OverlapDetectingRunner:
         finally:
             with self.lock:
                 self.active -= 1
+
+
+class FileChangingRunner:
+    def run(self, cwd: Path, prompt: str) -> dict[str, object]:
+        write_file(cwd / "generated.py", f"# {prompt}\n")
+        return {
+            "status": "success",
+            "llm_metrics": {
+                "model": "file-changing-test",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "reasoning_tokens": 0,
+                "cached_input_tokens": 0,
+                "duration_ms": 1,
+            },
+            "tool_metrics": {"tool_call_count": 0, "tool_calls": []},
+            "returncode": 0,
+        }
 
 
 if __name__ == "__main__":

@@ -16,7 +16,9 @@ python -m agentcd_bench \
 If commits are omitted, the CLI uses:
 
 - version A: current project `HEAD`
-- version B: `master`
+- version B: `main`
+
+The default project is the repository's `hugoDocs` folder. Pass `--project` to override it.
 
 ## Output
 
@@ -93,5 +95,21 @@ python -m agentcd_bench \
   --runs 1 \
   --runner codex
 ```
+
+To commit each generated result temporarily and send each paired attempt to the Greptile FastAPI service, start the service separately and add:
+
+```bash
+python -m agentcd_bench \
+  --project /path/to/repo \
+  --commit-a candidate-sha \
+  --commit-b baseline-sha \
+  --prompt "Rename old_function to new_function and update all callers and tests." \
+  --runs 1 \
+  --runner codex \
+  --base-branch main \
+  --evaluator-url http://127.0.0.1:8000
+```
+
+AgentCD resets each evaluated attempt to its starting commit, captures its patch and changed files, creates an unpushed temporary commit and branch, calls `POST /evaluations` once for the candidate/baseline pair, includes the complete response under `evaluations`, and deletes the temporary branches after the response returns.
 
 The `codex` runner shells out to `codex exec --json --ephemeral --cd <worktree>`, closes inherited stdin, parses JSONL events when available, and always records status and wall-clock duration.

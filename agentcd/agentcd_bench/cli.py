@@ -13,15 +13,21 @@ from .output import comparison_table
 from .service import BenchmarkConfig, run_benchmark
 from .tracing import JsonlTraceLogger
 
+DEFAULT_PROJECT = Path(__file__).resolve().parents[2] / "hugoDocs"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agents-bench",
         description="Compare Codex metrics across two committed AGENTS.md versions.",
     )
-    parser.add_argument("--project", required=True, help="Path to the git repository to benchmark.")
+    parser.add_argument(
+        "--project",
+        default=str(DEFAULT_PROJECT),
+        help=f"Repository or subdirectory to benchmark. Default: {DEFAULT_PROJECT}",
+    )
     parser.add_argument("--commit-a", help="Commit hash for version A. Defaults to project HEAD.")
-    parser.add_argument("--commit-b", help="Commit hash for version B. Defaults to master.")
+    parser.add_argument("--commit-b", help="Commit hash for version B. Defaults to main.")
     prompt_group = parser.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("--prompt", help="Prompt text to run in both worktrees.")
     prompt_group.add_argument("--prompt-file", help="File containing the prompt to run.")
@@ -40,6 +46,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execution backend. Use mock for local validation without Codex credentials.",
     )
     parser.add_argument("--codex-command", default="codex", help="Codex executable to invoke. Default: codex.")
+    parser.add_argument(
+        "--evaluator-url",
+        help="FastAPI evaluator base URL, for example http://127.0.0.1:8000.",
+    )
+    parser.add_argument("--base-branch", default="main", help="Base branch passed to Greptile. Default: main.")
+    parser.add_argument(
+        "--evaluator-timeout",
+        type=float,
+        default=700.0,
+        help="Evaluation service HTTP timeout in seconds. Default: 700.",
+    )
     return parser
 
 
@@ -75,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         codex_command=args.codex_command if args.runner == "codex" else None,
         keep_worktrees=args.keep_worktrees,
         json_only=args.json_only,
+        evaluator_url=args.evaluator_url,
+        base_branch=args.base_branch,
         prompt_source=prompt_source,
         prompt_chars=len(prompt),
         prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -96,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
         runs=args.runs,
         keep_worktrees=args.keep_worktrees,
         log_file=log_file,
+        evaluator_url=args.evaluator_url,
+        evaluator_timeout_seconds=args.evaluator_timeout,
+        base_branch=args.base_branch,
     )
 
     try:

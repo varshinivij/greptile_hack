@@ -13,6 +13,8 @@ class WorktreePair:
     commit_b: str
     path_a: Path
     path_b: Path
+    root_a: Path
+    root_b: Path
 
 
 class WorktreeManager(AbstractContextManager[WorktreePair]):
@@ -26,22 +28,31 @@ class WorktreeManager(AbstractContextManager[WorktreePair]):
 
     def __enter__(self) -> WorktreePair:
         ensure_git_repo(self.project)
+        repository_root = Path(git(self.project, "rev-parse", "--show-toplevel").strip()).resolve()
+        project_relative = self.project.resolve().relative_to(repository_root)
         commit_a = resolve_commit(self.project, self.requested_commit_a or "HEAD")
-        commit_b = resolve_commit(self.project, self.requested_commit_b or "master")
+        commit_b = resolve_commit(self.project, self.requested_commit_b or "main")
         self.tempdir = tempfile.TemporaryDirectory(prefix="agents-bench-")
         base = Path(self.tempdir.name)
-        path_a = base / "run-a"
-        path_b = base / "run-b"
-        git(self.project, "worktree", "add", "--detach", str(path_a), commit_a)
-        git(self.project, "worktree", "add", "--detach", str(path_b), commit_b)
-        self.pair = WorktreePair(commit_a=commit_a, commit_b=commit_b, path_a=path_a, path_b=path_b)
+        root_a = base / "run-a"
+        root_b = base / "run-b"
+        git(repository_root, "worktree", "add", "--detach", str(root_a), commit_a)
+        git(repository_root, "worktree", "add", "--detach", str(root_b), commit_b)
+        self.pair = WorktreePair(
+            commit_a=commit_a,
+            commit_b=commit_b,
+            path_a=root_a / project_relative,
+            path_b=root_b / project_relative,
+            root_a=root_a,
+            root_b=root_b,
+        )
         return self.pair
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         if self.keep:
             return False
         if self.pair:
-            for path in (self.pair.path_a, self.pair.path_b):
+            for path in (self.pair.root_a, self.pair.root_b):
                 subprocess.run(
                     ["git", "-C", str(self.project), "worktree", "remove", "--force", str(path)],
                     text=True,
