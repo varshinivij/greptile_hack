@@ -9,8 +9,12 @@ description = "Compare Codex runs across two AGENTS.md commit versions."
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+report = ["openai>=1.0"]
+
 [project.scripts]
 agents-bench = "agentcd_bench.cli:main"
+agentcd-report = "agentcd_bench.report:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
