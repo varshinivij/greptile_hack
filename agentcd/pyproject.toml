@@ -15,6 +15,7 @@ report = ["openai>=1.0"]
 [project.scripts]
 agents-bench = "agentcd_bench.cli:main"
 agentcd-report = "agentcd_bench.report:main"
+agentcd-evaluate = "agentcd_bench.evaluation_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

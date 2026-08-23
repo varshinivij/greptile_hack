@@ -158,6 +158,20 @@ decision = evaluate_policy_payload(evidence_payload, policy_config_payload)
 result = decision.to_dict()
 ```
 
+For a deterministic, judge-friendly Markdown artifact, replay normalized evidence
+through the evaluation CLI:
+
+```bash
+agentcd-evaluate \
+  --evidence tests/fixtures/evaluation/healthy_evidence.json \
+  --policy tests/fixtures/evaluation/offline_policy.json \
+  --output decision.md
+```
+
+The report includes the decision, policy and version identifiers, gate statuses,
+reason codes, coverage, observations and thresholds, missing evidence, and schema
+versions. Use `--format json` for the canonical machine-readable decision.
+
 The contracts reject unknown schema or policy versions. Valid but incomplete evaluator data produces `hold`; configured critical findings or forbidden side effects produce `reject`. The offline-v1 policy can return `promote`, `hold`, `reject`, or `human_review`, but never changes traffic itself.
 
 Canonical payloads are in `tests/fixtures/evaluation/healthy_evidence.json` and `tests/fixtures/evaluation/offline_policy.json`. The thresholds in that policy are demo fixtures, not calibrated production defaults.

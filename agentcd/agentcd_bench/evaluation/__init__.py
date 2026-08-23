@@ -14,6 +14,7 @@ from .models import (
 )
 from .parsing import parse_evidence, parse_policy_config
 from .policy import evaluate_policy, evaluate_policy_payload
+from .output import decision_report_markdown
 
 __all__ = [
     "DECISION_SCHEMA_VERSION",
@@ -28,6 +29,7 @@ __all__ = [
     "ReasonCode",
     "evaluate_policy",
     "evaluate_policy_payload",
+    "decision_report_markdown",
     "parse_evidence",
     "parse_policy_config",
 ]
