@@ -10,8 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentcd_bench.cli import main
-from agentcd_bench.codex_client import CodexExecRunner
+from agentcd_bench.codex_client import CodexExecRunner, parse_codex_jsonl
 from agentcd_bench.metrics import percentile, summarize_attempts
+from agentcd_bench.output import compact_result
 from agentcd_bench.service import BenchmarkConfig, run_benchmark
 
 
@@ -32,6 +33,137 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(summary["total_tokens"]["p50"], 10)
         self.assertEqual(summary["duration_ms"]["p90"], 200)
         self.assertEqual(summary["tool_call_count"]["avg"], 3)
+
+
+class CodexJsonlParserTest(unittest.TestCase):
+    def test_counts_command_execution_events(self) -> None:
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.started",
+                        "ts": 10.0,
+                        "item": {
+                            "id": "item_1",
+                            "type": "command_execution",
+                            "command": "rg layouts .",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "ts": 10.25,
+                        "item": {
+                            "id": "item_1",
+                            "type": "command_execution",
+                            "command": "rg layouts .",
+                            "status": "completed",
+                            "exit_code": 0,
+                            "aggregated_output": "layouts/baseof.html\n",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 40,
+                            "output_tokens": 20,
+                        },
+                    }
+                ),
+            ]
+        )
+
+        parsed = parse_codex_jsonl(stdout)
+
+        self.assertEqual(parsed["llm_metrics"]["total_tokens"], 120)
+        self.assertEqual(parsed["tool_metrics"]["tool_call_count"], 1)
+        self.assertEqual(parsed["tool_metrics"]["failed_tool_call_count"], 0)
+        tool = parsed["tool_metrics"]["tool_calls"][0]
+        self.assertEqual(tool["name"], "command_execution")
+        self.assertEqual(tool["started_count"], 1)
+        self.assertEqual(tool["completed_count"], 1)
+        self.assertEqual(tool["duration_ms"], 250)
+        self.assertEqual(tool["commands"], ["rg layouts ."])
+        self.assertEqual(tool["output_chars"], len("layouts/baseof.html\n"))
+
+    def test_counts_failed_command_execution(self) -> None:
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_1",
+                            "type": "command_execution",
+                            "command": "false",
+                            "status": "completed",
+                            "exit_code": 1,
+                            "aggregated_output": "",
+                        },
+                    }
+                )
+            ]
+        )
+
+        parsed = parse_codex_jsonl(stdout)
+
+        self.assertEqual(parsed["tool_metrics"]["tool_call_count"], 1)
+        self.assertEqual(parsed["tool_metrics"]["failed_tool_call_count"], 1)
+        self.assertEqual(parsed["tool_metrics"]["tool_calls"][0]["failed_count"], 1)
+
+
+class OutputTest(unittest.TestCase):
+    def test_compact_result_truncates_long_command_samples(self) -> None:
+        result = {
+            "project": "/repo",
+            "run_count": 1,
+            "log_file": "/tmp/log.jsonl",
+            "execution": {},
+            "runs": [
+                {
+                    "version": "a",
+                    "commit": "abc",
+                    "worktree": None,
+                    "summary": {},
+                    "attempts": [
+                        {
+                            "run_index": 1,
+                            "status": "success",
+                            "returncode": 0,
+                            "llm_metrics": {},
+                            "tool_metrics": {
+                                "tool_call_count": 7,
+                                "tool_calls": [
+                                    {
+                                        "name": "command_execution",
+                                        "commands": [f"cmd-{index}" for index in range(7)],
+                                    }
+                                ],
+                            },
+                            "git_diff": {
+                                "changed_files": ["README.md"],
+                                "stat": " README.md | 1 +\n",
+                                "diff": "diff --git a/README.md b/README.md\n",
+                            },
+                            "raw_logs": {},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        compact = compact_result(result)
+
+        tool_call = compact["runs"][0]["attempts"][0]["tool_metrics"]["tool_calls"][0]
+        self.assertEqual(tool_call["commands"], ["cmd-0", "cmd-1", "cmd-2", "cmd-3", "cmd-4"])
+        self.assertEqual(tool_call["commands_truncated"], 2)
+        git_diff = compact["runs"][0]["attempts"][0]["git_diff"]
+        self.assertNotIn("diff", git_diff)
+        self.assertTrue(git_diff["diff_truncated"])
 
 
 class CliTest(unittest.TestCase):
@@ -110,6 +242,8 @@ class CliTest(unittest.TestCase):
             self.assertIn("cli_start", events)
             self.assertIn("worktrees_created", events)
             self.assertIn("attempt_start", events)
+            self.assertIn("codex_invocation_logs", events)
+            self.assertIn("attempt_git_diff", events)
             self.assertIn("attempt_metrics_parsed", events)
             self.assertIn("attempt_end", events)
             self.assertIn("summaries_created", events)
@@ -121,6 +255,102 @@ class CliTest(unittest.TestCase):
             self.assertEqual(cli_start["level"], "info")
             self.assertNotIn("Do not write", actual_log_file.read_text(encoding="utf-8"))
             self.assertIn("<redacted>", cli_start["argv"])
+
+            attempt = result["runs"][0]["attempts"][0]
+            stdout_log = Path(attempt["raw_logs"]["stdout_jsonl"])
+            stderr_log = Path(attempt["raw_logs"]["stderr"])
+            self.assertTrue(stdout_log.exists())
+            self.assertTrue(stderr_log.exists())
+            self.assertTrue(stdout_log.name.endswith(".codex-a-run-1.stdout.jsonl"))
+            self.assertTrue(stderr_log.name.endswith(".codex-a-run-1.stderr.log"))
+
+    def test_cli_verbose_flag_is_logged_and_prints_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            log_file = Path(temp) / "logs" / "run.jsonl"
+            init_fixture_repo(project)
+
+            output = capture_stdout(
+                [
+                    "--project",
+                    str(project),
+                    "--commit-a",
+                    "HEAD",
+                    "--commit-b",
+                    "HEAD",
+                    "--prompt",
+                    "Explain the codebase.",
+                    "--runs",
+                    "1",
+                    "--runner",
+                    "mock",
+                    "--json-only",
+                    "--verbose",
+                    "--log-file",
+                    str(log_file),
+                ]
+            )
+
+            result = json.loads(output)
+            actual_log_file = Path(result["log_file"])
+            records = [json.loads(line) for line in actual_log_file.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(next(record for record in records if record["event"] == "cli_start")["verbose"])
+            self.assertTrue(next(record for record in records if record["event"] == "cli_output_written")["verbose"])
+
+    def test_attempt_log_includes_git_diff_when_runner_changes_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            log_file = Path(temp) / "run.jsonl"
+            init_fixture_repo(project)
+
+            result = run_benchmark(
+                BenchmarkConfig(
+                    project=project,
+                    commit_a="HEAD",
+                    commit_b="HEAD",
+                    prompt="Change README.",
+                    runs=1,
+                    log_file=log_file,
+                ),
+                FileChangingRunner(),
+            )
+
+            self.assertEqual(result["runs"][0]["attempts"][0]["git_diff"]["changed_files"], ["README.md"])
+            self.assertIn("+Generated change.", result["runs"][0]["attempts"][0]["git_diff"]["diff"])
+            records = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+            diff_events = [record for record in records if record["event"] == "attempt_git_diff"]
+            self.assertEqual(len(diff_events), 2)
+            self.assertIn("+Generated change.", diff_events[0]["diff"])
+            self.assertEqual(diff_events[0]["changed_files"], ["README.md"])
+
+    def test_attempt_log_includes_untracked_files_in_git_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            log_file = Path(temp) / "run.jsonl"
+            init_fixture_repo(project)
+
+            result = run_benchmark(
+                BenchmarkConfig(
+                    project=project,
+                    commit_a="HEAD",
+                    commit_b="HEAD",
+                    prompt="Create a new file.",
+                    runs=1,
+                    log_file=log_file,
+                ),
+                UntrackedFileRunner(),
+            )
+
+            diff = result["runs"][0]["attempts"][0]["git_diff"]
+            self.assertEqual(diff["changed_files"], ["NEW_FILE.md"])
+            self.assertEqual(diff["name_status"], ["A\tNEW_FILE.md"])
+            self.assertEqual(diff["status_porcelain"], ["?? NEW_FILE.md"])
+            self.assertIn("new untracked content", diff["diff"])
+
+            records = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+            diff_event = next(record for record in records if record["event"] == "attempt_git_diff")
+            self.assertIn("new untracked content", diff_event["diff"])
+            self.assertEqual(diff_event["name_status"], ["A\tNEW_FILE.md"])
 
 
 class OrchestrationTest(unittest.TestCase):
@@ -200,6 +430,8 @@ class CodexRunnerTest(unittest.TestCase):
                 "exec",
                 "--json",
                 "--ephemeral",
+                "--sandbox",
+                "workspace-write",
                 "--cd",
                 "/tmp/worktree",
                 "--model",
@@ -251,7 +483,7 @@ class OverlapDetectingRunner:
         self.max_active = 0
         self.lock = threading.Lock()
 
-    def run(self, cwd: Path, prompt: str) -> dict[str, object]:
+    def run(self, cwd: Path, prompt: str, context: object | None = None) -> dict[str, object]:
         with self.lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
@@ -280,8 +512,9 @@ class OverlapDetectingRunner:
 
 
 class FileChangingRunner:
-    def run(self, cwd: Path, prompt: str) -> dict[str, object]:
-        write_file(cwd / "generated.py", f"# {prompt}\n")
+    def run(self, cwd: Path, prompt: str, context: object | None = None) -> dict[str, object]:
+        readme = cwd / "README.md"
+        readme.write_text(readme.read_text(encoding="utf-8") + "\nGenerated change.\n", encoding="utf-8")
         return {
             "status": "success",
             "llm_metrics": {
@@ -291,9 +524,34 @@ class FileChangingRunner:
                 "total_tokens": 2,
                 "reasoning_tokens": 0,
                 "cached_input_tokens": 0,
-                "duration_ms": 1,
+                "duration_ms": 100,
             },
-            "tool_metrics": {"tool_call_count": 0, "tool_calls": []},
+            "tool_metrics": {
+                "tool_call_count": 0,
+                "tool_calls": [],
+            },
+            "returncode": 0,
+        }
+
+
+class UntrackedFileRunner:
+    def run(self, cwd: Path, prompt: str, context: object | None = None) -> dict[str, object]:
+        (cwd / "NEW_FILE.md").write_text("new untracked content\n", encoding="utf-8")
+        return {
+            "status": "success",
+            "llm_metrics": {
+                "model": "untracked-file-test",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "reasoning_tokens": 0,
+                "cached_input_tokens": 0,
+                "duration_ms": 100,
+            },
+            "tool_metrics": {
+                "tool_call_count": 0,
+                "tool_calls": [],
+            },
             "returncode": 0,
         }
 

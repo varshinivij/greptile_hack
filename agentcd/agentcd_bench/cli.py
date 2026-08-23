@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .codex_client import CodexExecRunner, MockCodexRunner
-from .output import comparison_table
+from .output import compact_result, comparison_table, verbose_result
 from .service import BenchmarkConfig, run_benchmark
 from .tracing import JsonlTraceLogger
 
@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="Optional Codex model name.")
     parser.add_argument("--keep-worktrees", action="store_true", help="Keep temp worktrees after the run.")
     parser.add_argument("--json-only", action="store_true", help="Only print JSON, without the comparison table.")
+    parser.add_argument("--verbose", action="store_true", help="Print full verbose JSON, including per-attempt details.")
     parser.add_argument(
         "--log-file",
         help="Path for JSONL trace logs. Defaults to logs/agents-bench-<timestamp>.jsonl.",
@@ -94,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         json_only=args.json_only,
         evaluator_url=args.evaluator_url,
         base_branch=args.base_branch,
+        verbose=args.verbose,
         prompt_source=prompt_source,
         prompt_chars=len(prompt),
         prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -127,11 +129,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "error", "error": str(exc)}, indent=2), file=sys.stderr)
         return 1
 
-    print(json.dumps(result, indent=2))
+    output_result = verbose_result(result) if args.verbose else compact_result(result)
+    print(json.dumps(output_result, indent=2))
     if not args.json_only:
         print()
         print(comparison_table(result))
-    logger.event("cli_output_written", json_only=args.json_only)
+    logger.event("cli_output_written", json_only=args.json_only, verbose=args.verbose)
     logger.event("cli_end", status="success")
     return 0
 

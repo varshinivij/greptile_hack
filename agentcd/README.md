@@ -22,7 +22,7 @@ The default project is the repository's `hugoDocs` folder. Pass `--project` to o
 
 ## Output
 
-The CLI prints JSON first, followed by a side-by-side comparison table unless `--json-only` is set.
+The CLI prints compact JSON first, followed by a side-by-side comparison table unless `--json-only` is set. Compact JSON includes diff metadata but omits the full patch. Use `--verbose` to print the full per-attempt JSON payload, including full `git diff` patches, for downstream analysis or report generation.
 
 The JSON includes:
 
@@ -44,10 +44,25 @@ Override the path with:
 
 The CLI appends the invocation timestamp to explicit log files, so that example writes `/tmp/agents-bench-<timestamp>.jsonl`. If `--log-file` points to a directory, the CLI writes `agents-bench-<timestamp>.jsonl` inside it.
 
-Trace logs include CLI start/end, sanitized args, cwd, runner choice, prompt source, prompt length, prompt SHA-256, benchmark start/end, setup progress, worktree paths, version submit/start/end, attempt start/end, parsed attempt metrics, summary creation, status, duration, token totals, and tool-call count. Raw inline prompt text is redacted. To watch progress while a run is active:
+Trace logs include CLI start/end, sanitized args, cwd, runner choice, prompt source, prompt length, prompt SHA-256, benchmark start/end, setup progress, worktree paths, version submit/start/end, attempt start/end, per-attempt raw Codex log paths, full `git diff`, changed files, diff name-status, porcelain status, diff stat, parsed attempt metrics, summary creation, status, duration, token totals, and tool-call count. Untracked files are included by marking them intent-to-add in the temporary worktree before diff capture. Raw inline prompt text is redacted. To watch progress while a run is active:
 
 ```bash
 tail -f logs/agents-bench-<timestamp>.jsonl
+```
+
+Each Codex invocation also gets separate raw logs in the same directory:
+
+```text
+<main-log-stem>.codex-a-run-1.stdout.jsonl
+<main-log-stem>.codex-a-run-1.stderr.log
+<main-log-stem>.codex-b-run-1.stdout.jsonl
+<main-log-stem>.codex-b-run-1.stderr.log
+```
+
+Tail an individual Codex run while it is active:
+
+```bash
+tail -f logs/<main-log-stem>.codex-a-run-1.stdout.jsonl
 ```
 
 Version A and version B run concurrently after both worktrees are created. Repeated runs within the same version run sequentially.
@@ -61,7 +76,7 @@ The CLI is intentionally thin:
 - `agentcd_bench.cli` handles flags and output.
 - `agentcd_bench.service` owns benchmark orchestration and can later be called from FastAPI.
 - `agentcd_bench.codex_client.Runner` is the execution boundary.
-- `CodexExecRunner` currently shells out to `codex exec --ephemeral`.
+- `CodexExecRunner` currently shells out to `codex exec --ephemeral --sandbox workspace-write`.
 - A future direct Codex API runner can replace `CodexExecRunner` without changing worktree orchestration or metrics aggregation.
 
 ## Validate The CLI
@@ -112,7 +127,23 @@ python -m agentcd_bench \
 
 AgentCD resets each evaluated attempt to its starting commit, captures its patch and changed files, creates an unpushed temporary commit and branch, calls `POST /evaluations` once for the candidate/baseline pair, includes the complete response under `evaluations`, and deletes the temporary branches after the response returns.
 
-The `codex` runner shells out to `codex exec --json --ephemeral --cd <worktree>`, closes inherited stdin, parses JSONL events when available, and always records status and wall-clock duration.
+The `codex` runner shells out to `codex exec --json --ephemeral --sandbox workspace-write --cd <worktree>`, closes inherited stdin, parses JSONL events when available, and always records status and wall-clock duration.
+
+Generate verbose machine-readable benchmark output for `agentcd-report`:
+
+```bash
+python -m agentcd_bench \
+  --project /path/to/git/repo \
+  --commit-a candidate-sha \
+  --commit-b baseline-sha \
+  --prompt-file examples/grafana-like-codebase/prompt.txt \
+  --runs 3 \
+  --runner codex \
+  --json-only \
+  --verbose > benchmark.json
+
+agentcd-report --input benchmark.json --output report.md
+```
 
 ## Offline Evaluation Policy
 

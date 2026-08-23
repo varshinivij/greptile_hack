@@ -13,6 +13,27 @@ include free-form evaluator explanations instead of (or alongside) numeric
 scores, or might mix all of that. Read what's actually there and work with
 it — do not expect or demand a particular schema.
 
+When generating a report from a fresh `agentcd` benchmark run, prefer
+capturing verbose machine-readable benchmark output first:
+
+```bash
+python -m agentcd_bench \
+  --project /path/to/git/repo \
+  --commit-a candidate-sha \
+  --commit-b baseline-sha \
+  --prompt-file prompt.txt \
+  --runs 3 \
+  --runner codex \
+  --json-only \
+  --verbose > benchmark.json
+
+agentcd-report --input benchmark.json --output report.md
+```
+
+Use verbose benchmark JSON because it preserves per-attempt metrics, raw
+Codex log paths, full `git diff` patches, diff metadata, and tool-call
+details that may be lost or truncated in compact CLI output.
+
 **You make the recommendation.** Nothing upstream has decided a winner for
 you. Weigh the evidence yourself: which agent actually did better on
 correctness/task success, code quality, tests, and any Greptile or

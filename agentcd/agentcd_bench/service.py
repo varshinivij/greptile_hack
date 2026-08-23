@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .codex_client import Runner
+from .codex_client import RunContext, Runner
 from .evaluator_client import EvaluationClient
 from .git_worktrees import WorktreeManager, git
 from .metrics import summarize_attempts
@@ -174,11 +175,58 @@ def run_attempts(
         if capture_artifact:
             git(cwd, "reset", "--hard", starting_commit)
             git(cwd, "clean", "-fd")
-        logger.event("attempt_start", version=version, run_index=run_index, cwd=str(cwd))
-        attempt = runner.run(cwd=cwd, prompt=prompt)
+        run_context = build_run_context(logger.path, version, run_index)
+        logger.event(
+            "attempt_start",
+            version=version,
+            run_index=run_index,
+            cwd=str(cwd),
+            raw_stdout_log=str(run_context.raw_stdout_path) if run_context.raw_stdout_path else None,
+            raw_stderr_log=str(run_context.raw_stderr_path) if run_context.raw_stderr_path else None,
+        )
+        logger.event(
+            "codex_invocation_logs",
+            level="debug",
+            version=version,
+            run_index=run_index,
+            stdout_jsonl=str(run_context.raw_stdout_path) if run_context.raw_stdout_path else None,
+            stderr=str(run_context.raw_stderr_path) if run_context.raw_stderr_path else None,
+        )
+        attempt = runner.run(cwd=cwd, prompt=prompt, context=run_context)
         attempt["run_index"] = run_index
+        diff = capture_git_diff(cwd)
+        attempt["git_diff"] = {
+            "changed_files": diff["changed_files"],
+            "name_status": diff["name_status"],
+            "status_porcelain": diff["status_porcelain"],
+            "stat": diff["stat"],
+            "diff": diff["diff"],
+        }
+        if diff["error"]:
+            logger.event(
+                "attempt_git_diff_error",
+                level="debug",
+                version=version,
+                run_index=run_index,
+                cwd=str(cwd),
+                error=diff["error"],
+            )
+        else:
+            logger.event(
+                "attempt_git_diff",
+                level="debug",
+                version=version,
+                run_index=run_index,
+                cwd=str(cwd),
+                changed_files=diff["changed_files"],
+                changed_file_count=len(diff["changed_files"]),
+                name_status=diff["name_status"],
+                status_porcelain=diff["status_porcelain"],
+                stat=diff["stat"],
+                diff=diff["diff"],
+            )
         if capture_artifact:
-            attempt["artifact"] = commit_attempt(cwd, version, run_index)
+            attempt["artifact"] = commit_attempt(cwd, version, run_index, diff)
         logger.event(
             "attempt_metrics_parsed",
             level="debug",
@@ -207,8 +255,9 @@ def run_attempts(
     return attempts
 
 
-def commit_attempt(cwd: Path, version: str, run_index: int) -> dict[str, Any]:
-    changed_files = [line for line in git(cwd, "status", "--porcelain").splitlines() if line]
+def commit_attempt(cwd: Path, version: str, run_index: int, diff: dict[str, Any] | None = None) -> dict[str, Any]:
+    diff = diff or capture_git_diff(cwd)
+    changed_files = list(diff.get("status_porcelain", []))
     git(cwd, "add", "-A")
     patch = git(cwd, "diff", "--cached", "--binary")
     git(
@@ -231,4 +280,53 @@ def commit_attempt(cwd: Path, version: str, run_index: int) -> dict[str, Any]:
         "patch": patch,
         "changed_files": changed_files,
         "has_changes": bool(changed_files),
+    }
+
+
+def build_run_context(log_file: Path | None, version: str, run_index: int) -> RunContext:
+    if not log_file:
+        return RunContext(version=version, run_index=run_index)
+    base = log_file.with_suffix("")
+    return RunContext(
+        version=version,
+        run_index=run_index,
+        raw_stdout_path=base.with_name(f"{base.name}.codex-{version}-run-{run_index}.stdout.jsonl"),
+        raw_stderr_path=base.with_name(f"{base.name}.codex-{version}-run-{run_index}.stderr.log"),
+    )
+
+
+def capture_git_diff(cwd: Path) -> dict[str, Any]:
+    status = run_git(cwd, "status", "--porcelain")
+    intent_to_add = run_git(cwd, "add", "-N", ".")
+    stat = run_git(cwd, "diff", "--stat", "--find-renames")
+    name_status = run_git(cwd, "diff", "--name-status", "--find-renames")
+    name_only = run_git(cwd, "diff", "--name-only", "--find-renames")
+    diff = run_git(cwd, "diff", "--no-ext-diff", "--find-renames")
+
+    errors = [
+        item["stderr"]
+        for item in (status, intent_to_add, stat, name_status, name_only, diff)
+        if item["returncode"] != 0
+    ]
+    return {
+        "changed_files": [line for line in name_only["stdout"].splitlines() if line],
+        "name_status": [line for line in name_status["stdout"].splitlines() if line],
+        "status_porcelain": [line for line in status["stdout"].splitlines() if line],
+        "stat": stat["stdout"],
+        "diff": diff["stdout"],
+        "error": "\n".join(errors),
+    }
+
+
+def run_git(cwd: Path, *args: str) -> dict[str, Any]:
+    proc = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr.strip(),
     }

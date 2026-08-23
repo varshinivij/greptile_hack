@@ -14,10 +14,10 @@ This plan distinguishes what is implemented in this repository from integration 
 
 | Capability | Current repository state | Required next step |
 | --- | --- | --- |
-| CLI | `agentcd_bench.cli` accepts a repository, two commits, one prompt, a run count, a runner, an optional trace-log path, and an optional evaluator URL | Keep it as the local entrypoint and add a stable machine-readable evidence and decision contract |
+| CLI | `agentcd_bench.cli` accepts a repository, two commits, one prompt, a run count, a runner, optional trace-log path, optional evaluator URL, and compact or verbose JSON output | Keep it as the local entrypoint and add a stable machine-readable evidence and decision contract |
 | Benchmark service | `run_benchmark` launches A and B concurrently, keeps attempts within each version sequential, and pairs attempts by run index for evaluation | Add explicit named roles and task metadata, cancellation, normalization, and policy invocation |
 | Worktrees and artifacts | `WorktreeManager` creates two detached worktrees; evaluator-enabled runs reset each side before every attempt, capture patches and changed files, create unpushed temporary commits and branches, and clean up after evaluation | Version the artifact contract and verify repeated-run isolation and cleanup across failure paths |
-| Codex execution | `CodexExecRunner` invokes `codex exec --json --ephemeral` with closed stdin; `MockCodexRunner` supports credential-free tests | Preserve fresh sessions while also capturing the final response, generated diff, failures, and bounded raw events |
+| Codex execution | `CodexExecRunner` invokes `codex exec --json --ephemeral --sandbox workspace-write` with closed stdin; `MockCodexRunner` supports credential-free tests | Preserve fresh sessions while also capturing the final response, generated diff, failures, and bounded raw events |
 | Metrics | Token, duration, and tool counts are summarized with average, p50, and p90 | Add paired quality, reliability, evaluator, and policy evidence |
 | Tracing | A thread-safe JSONL logger records benchmark, worktree, version, and attempt progress | Attach trace artifacts to benchmark results and keep them distinct from policy evidence |
 | Output | JSON plus a Markdown comparison table, execution metadata, log path, attempt artifacts, and raw paired evaluation-service responses when configured | Add a schema version, named baseline/candidate evidence, and the structured policy decision |
@@ -189,11 +189,11 @@ python3 -m agentcd_bench \
   --runs 5
 ```
 
-The first server integration may invoke this CLI with JSON-only output. The preferred long-term integration is to call `agentcd_bench.service` directly so CLI parsing and terminal rendering stay outside the server workflow.
+The first server integration may invoke this CLI with `--json-only --verbose` output so full per-attempt `git diff` patches are present in the JSON. Compact CLI output keeps diff metadata but omits the full patch. The preferred long-term integration is to call `agentcd_bench.service` directly so CLI parsing and terminal rendering stay outside the server workflow.
 
 The service currently creates both worktrees and uses two worker threads to launch version A and version B concurrently. Repeated attempts inside each version remain sequential. Any future runner or evaluator shared across these two version threads must be concurrency-safe, or the orchestration must create one instance per version.
 
-The Codex runner now uses an ephemeral session and closes inherited stdin. This prevents session resume and unrelated interactive input. It does not reset files changed by a prior attempt.
+The Codex runner now uses an ephemeral session, explicitly requests `workspace-write`, and closes inherited stdin. This prevents session resume and unrelated interactive input while allowing edits inside the temporary worktree. It does not reset files changed by a prior attempt.
 
 ### Current Behavior That Must Change Before Evaluation
 
@@ -501,7 +501,10 @@ Metrics already emitted by the CLI:
 - input, output, total, reasoning, and cached-input tokens
 - wall-clock duration
 - total and per-tool call counts
+- command execution counts from Codex `item.started` and `item.completed` events
+- per-tool completed and failed counts
 - per-tool duration when present in Codex events
+- command samples and aggregated output character totals
 - runner status and return code
 - average, p50, and p90 summaries
 
@@ -547,6 +550,9 @@ Current events include:
 - version submission and result collection
 - version start/end
 - attempt start/end
+- per-attempt raw Codex stdout/stderr log paths
+- full `git diff`
+- changed files, diff name-status, porcelain status, and diff stat
 - parsed attempt metrics
 - summary creation
 - attempt status
@@ -555,6 +561,15 @@ Current events include:
 Raw inline prompt text is redacted from logs.
 
 The logger serializes concurrent writes from the A and B threads. These logs make long-running local benchmarks observable, but they are not the benchmark artifact or the policy evidence contract. AgentCD includes their path in the corresponding benchmark result.
+
+Each Codex invocation also streams raw output to separate files beside the main trace log:
+
+- `<main-log-stem>.codex-a-run-1.stdout.jsonl`
+- `<main-log-stem>.codex-a-run-1.stderr.log`
+- `<main-log-stem>.codex-b-run-1.stdout.jsonl`
+- `<main-log-stem>.codex-b-run-1.stderr.log`
+
+Diff capture includes untracked files by marking them intent-to-add in the temporary worktree before running `git diff`. This makes moved directories show both tracked deletions and untracked additions in the logged patch.
 
 ## Delivery Phases
 
