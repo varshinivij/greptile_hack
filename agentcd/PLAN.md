@@ -19,11 +19,11 @@ This plan extends the code that is present today; it does not assume the FastAPI
 | Worktrees | `WorktreeManager` creates two detached worktrees, one shared by all A attempts and one shared by all B attempts | Use a clean worktree or reset for every attempt and support temporary evaluation branches |
 | Codex execution | `CodexExecRunner` invokes `codex exec --json --ephemeral` with closed stdin; `MockCodexRunner` supports credential-free tests | Preserve fresh sessions while also capturing the final response, generated diff, failures, and bounded raw events |
 | Metrics | Token, duration, and tool counts are summarized with average, p50, and p90 | Add paired quality, reliability, evaluator, and policy evidence |
-| Tracing | A thread-safe JSONL logger records benchmark, worktree, version, and attempt progress | Attach trace artifacts to durable jobs and keep them distinct from policy evidence |
+| Tracing | A thread-safe JSONL logger records benchmark, worktree, version, and attempt progress | Attach trace artifacts to benchmark results and keep them distinct from policy evidence |
 | Output | JSON plus a Markdown comparison table, execution metadata, and log path | Add a schema version and named baseline/candidate records |
-| Tests | Five `unittest` tests cover metrics, the mock CLI flow, A/B concurrency, and fresh Codex invocation | Add attempt-isolation, artifact, evaluator, policy, and worker tests |
+| Tests | Five `unittest` tests cover metrics, the mock CLI flow, A/B concurrency, and fresh Codex invocation | Add attempt-isolation, artifact, evaluator, policy, and API-integration tests |
 | Prompt data | Seed instructions and 1,000 synthetic prompt records exist | Curate runnable tasks and bind them to repositories, setup, and expected checks |
-| FastAPI, persistence, and workers | Not present | Add after the benchmark evidence boundary is stable |
+| FastAPI Greptile service | A minimal service exists under `../service` | Integrate its single `POST /evaluations` endpoint into the benchmark lifecycle |
 | Greptile, policy, and routing | Not present | Add in separate, testable stages described below |
 
 The current tests pass with `python3 -m unittest discover -s tests`.
@@ -55,28 +55,25 @@ Do not send all 1,000 prompts into a rollout decision. Start with a representati
 
 ## Responsibility Boundaries
 
-The target system has six separate responsibilities:
+The target system has five separate responsibilities:
 
-- **FastAPI control plane:** accepts API and GitHub webhook requests, validates them, creates durable jobs, returns status, and publishes results.
-- **Background worker:** owns the long-running workflow, retries, timeouts, cancellation, and cleanup. The HTTP request does not wait for a benchmark to finish.
+- **FastAPI Greptile service:** exposes one synchronous `POST /evaluations` endpoint, validates an exact pair of branches and commits, runs both Greptile reviews concurrently, and returns both complete outputs.
 - **Benchmark CLI/service:** creates isolated worktrees, runs the baseline and candidate agents on the same tasks, captures artifacts, and keeps worktrees alive until worktree-dependent evaluation is complete.
-- **Evaluation pipeline:** runs deterministic checks and Greptile and normalizes their output into paired evidence.
+- **Evaluation pipeline:** receives the two Greptile outputs from the FastAPI service, combines them with deterministic checks, and normalizes them into paired evidence.
 - **Evaluation policy:** consumes completed evidence and the current rollout stage, then returns a decision. It does not invoke agents, call Greptile, or mutate traffic.
 - **Rollout controller:** applies an approved decision to a router or feature-flag system. This remains separate from the policy.
 
-The current CLI treats versions A and B as neutral labels. The server API uses `candidate_ref` and `baseline_ref`. Its adapter deliberately maps candidate to `commit-a` and baseline to `commit-b`, then converts the CLI's A/B result into named candidate/baseline evidence before calling the policy. The server always supplies explicit refs and does not rely on the CLI's current `HEAD` and `master` defaults.
+The current CLI treats versions A and B as neutral labels. The integration maps candidate to A and baseline to B, sends both exact generated commits to `POST /evaluations`, then converts the A/B Greptile response into named candidate/baseline evidence before calling the evaluation function. The integration always supplies explicit refs and does not rely on the CLI's current `HEAD` and `master` defaults.
 
 ## End-To-End Flow
 
 ```mermaid
 flowchart TD
-    Trigger["Manual API request or GitHub PR webhook"]
-    API["FastAPI control plane<br/>validate, persist, enqueue, return 202"]
-    Worker["Background worker<br/>retries, timeout, cancellation"]
-    Bench["agentcd benchmark orchestration<br/>CLI subprocess first, service call later"]
+    Trigger["Run agentcd with a coding task"]
+    Bench["agentcd benchmark orchestration"]
     Trace["JSONL progress trace"]
 
-    Trigger --> API --> Worker --> Bench
+    Trigger --> Bench
     Bench --> Trace
 
     Bench --> Candidate["Fresh candidate attempt<br/>candidate AGENTS.md"]
@@ -87,29 +84,34 @@ flowchart TD
     CandidateRun --> Trace
     BaselineRun --> Trace
 
-    CandidateRun --> CandidateEval["Commit generated diff<br/>deterministic checks and Greptile"]
-    BaselineRun --> BaselineEval["Commit generated diff<br/>deterministic checks and Greptile"]
+    CandidateRun --> CandidateCommit["Commit generated candidate diff<br/>on a temporary branch"]
+    BaselineRun --> BaselineCommit["Commit generated baseline diff<br/>on a temporary branch"]
 
-    CandidateEval --> Evidence["Normalized paired evidence"]
-    BaselineEval --> Evidence
+    CandidateCommit --> API["POST /evaluations once<br/>both exact commits"]
+    BaselineCommit --> API
+    API --> GreptileA["Greptile candidate review"]
+    API --> GreptileB["Greptile baseline review"]
+    GreptileA --> Evidence["Evaluation function<br/>normalized paired evidence"]
+    GreptileB --> Evidence
 
     Evidence --> Policy["Versioned evaluation policy"]
     Policy --> Decision["Promote, hold, reject,<br/>rollback, or human review"]
 
-    Decision --> Result["Persist result and update PR check"]
+    Decision --> Result["Return benchmark result"]
     Decision --> Rollout["Rollout controller<br/>when live routing exists"]
 ```
 
 The exact call sequence is:
 
-1. FastAPI validates the trigger, persists a job, enqueues it, and returns immediately.
-2. A background worker invokes the benchmark CLI or service.
-3. The benchmark orchestration creates clean attempts, runs Codex, captures artifacts, and runs worktree-dependent evaluators before cleanup.
-4. The worker receives normalized evidence and calls the evaluation policy.
-5. The worker persists the policy decision and publishes it.
-6. A rollout controller may apply the decision after the relevant stage and authorization checks exist.
+1. A user runs `agentcd` with a repository, explicit baseline and candidate refs, and a coding task.
+2. The benchmark orchestration creates clean paired attempts and runs Codex for candidate and baseline.
+3. AgentCD captures each generated diff and creates an isolated temporary branch and commit for each result without pushing it.
+4. While those refs still exist, AgentCD makes one synchronous `POST /evaluations` call containing the repository, base branch, both temporary branches, and both exact commit IDs.
+5. FastAPI runs both Greptile CLI reviews concurrently and returns both complete outputs; one failure does not cancel the other.
+6. AgentCD sends the returned Greptile outputs, together with deterministic checks and run artifacts, to the evaluation function.
+7. The evaluation function normalizes the evidence and the policy may produce a decision. A rollout controller may apply that decision later when separately implemented and authorized.
 
-If the worker shells out to the CLI, Greptile must run inside that CLI job before its worktrees disappear, and the CLI result must include normalized Greptile evidence. When the worker later calls `agentcd_bench.service` directly, the evaluator remains a separate component but shares the service-managed worktree lifetime.
+The HTTP call intentionally waits for both Greptile reviews. There is no queue, durable job API, webhook API, database, or background worker in this version. AgentCD must call the endpoint before its worktrees and temporary evaluation branches disappear.
 
 ## Benchmark Execution
 
@@ -175,6 +177,25 @@ For code-changing tasks, run Greptile against the work produced by both the base
 
 The Greptile CLI can review a local branch and emit machine-readable JSON. It reviews committed changes and ignores uncommitted changes. The current benchmark worktrees are detached and Codex changes are uncommitted, so the benchmark lifecycle must create an isolated temporary branch for each attempt, commit the generated changes, and run Greptile against that attempt's clean starting point before cleanup. These commits are evaluation artifacts only; they are not pushed to the user's repository.
 
+AgentCD does not invoke Greptile directly. Once both paired attempt commits exist, it calls the FastAPI service exactly once:
+
+```json
+POST /evaluations
+
+{
+  "repo": "/path/to/repo",
+  "base_branch": "main",
+  "branch_a": "agentcd-eval/job-123/candidate",
+  "commit_a": "candidate-result-sha",
+  "branch_b": "agentcd-eval/job-123/baseline",
+  "commit_b": "baseline-result-sha"
+}
+```
+
+The service checks out each exact commit in its own temporary worktree and runs `greptile review --branch <base> --json` for both sides with Python async concurrency. It returns both complete Greptile outputs in the same response. A failed review includes its error, stderr or API response, exit code when available, duration, branch, and commit ID, while the other review is allowed to finish normally.
+
+The caller passes this response to the evaluation function. The HTTP service does not compare the two results, select a winner, score the agents, or make a rollout decision.
+
 Normalize Greptile output into evidence such as:
 
 - review completion status
@@ -184,9 +205,9 @@ Normalize Greptile output into evidence such as:
 - affected files and stable finding identifiers
 - raw review artifact for debugging and audit
 
-A Greptile timeout, authentication failure, or unavailable result is an evaluator infrastructure error. The job may retry it. If the evidence remains unavailable, the policy holds or requests human review; it never silently passes the candidate or counts the outage as a candidate-quality failure.
+A Greptile timeout, authentication failure, or unavailable result is an evaluator infrastructure error. AgentCD may retry the endpoint or the failed side according to bounded retry rules added later. If the evidence remains unavailable, the evaluation function holds or requests human review; it never silently passes the candidate or counts the outage as a candidate-quality failure.
 
-Greptile credentials are supplied to the worker through its secret environment and are never stored in artifacts or repository files.
+Greptile credentials are supplied to the FastAPI service through its environment and are never stored in artifacts or repository files.
 
 Reference: [Greptile CLI documentation](https://www.greptile.com/docs/code-review/greptile-cli).
 
@@ -245,21 +266,17 @@ The first policy uses:
 
 Exact thresholds remain configuration and must be calibrated using repeated baseline runs before automatic promotion is enabled.
 
-## FastAPI And Background Jobs
+## FastAPI Evaluation Endpoint
 
-No FastAPI package, persistence layer, or queue exists in the repository today.
+The FastAPI project lives under `../service` and deliberately exposes one workflow endpoint:
 
-The initial API surface is:
+- `POST /evaluations`: synchronously review two exact commits with Greptile and return both complete results.
 
-- `POST /v1/benchmarks`: validate a named baseline/candidate request, persist it, enqueue it, and return `202` with a job identifier.
-- `GET /v1/benchmarks/{job_id}`: return execution state and progress.
-- `GET /v1/benchmarks/{job_id}/results`: return artifacts, normalized evidence, and the policy decision.
-- `POST /v1/benchmarks/{job_id}/cancel`: request cancellation.
-- `POST /v1/webhooks/github`: validate and deduplicate configured GitHub events and enqueue a benchmark.
+`repo` is optional when the service has `EVAL_DEFAULT_REPO` configured. `base_branch` defaults to `main`. AgentCD normally supplies both explicitly, together with both temporary branch names and commit IDs.
 
-FastAPI's in-process background-task helper is not the durable job boundary. Long-running Codex and Greptile work needs a worker that survives API restarts and can enforce concurrency, retries, timeouts, and cancellation.
+The endpoint is a narrow Greptile execution boundary, not a benchmark control plane. It does not accept coding prompts, run Codex, persist jobs, enqueue work, expose polling endpoints, receive GitHub webhooks, normalize evidence, or call the rollout policy. Those capabilities are not part of the current API design.
 
-GitHub-triggered jobs use the PR base SHA as the baseline and head SHA as the candidate, record the webhook delivery identifier for idempotency, and publish a check containing the decision and a link to the full report. The first PR integration reports offline eligibility only.
+Because a review can take minutes, AgentCD uses a suitably long HTTP timeout and keeps its temporary refs alive through the response. API and Greptile timeouts are reported as evaluator infrastructure failures. Authentication is supplied to the service process through `GREPTILE_API_KEY` or an authenticated Greptile CLI session.
 
 ## Rollout Stages
 
@@ -276,22 +293,11 @@ Promotion is conservative and requires sufficient evidence over clean windows. S
 
 The evaluation policy only recommends the next action. A separately authorized rollout controller changes traffic. No router or feature-flag integration exists in the repository yet.
 
-## State And Persistence
+## State
 
-Keep execution state separate from policy and rollout state.
+The current version has no server-side persistence or durable job state. AgentCD owns the invocation lifecycle and records benchmark artifacts, Greptile responses, evaluation evidence, and trace logs in its result contract before cleaning up temporary refs.
 
-Benchmark job states:
-
-- received
-- queued
-- preparing
-- running
-- evaluating
-- decided
-- failed
-- cancelled
-
-Rollout states:
+Future rollout state remains separate from benchmark execution:
 
 - offline
 - shadow
@@ -364,7 +370,7 @@ Current events include:
 
 Raw inline prompt text is redacted from logs.
 
-The logger serializes concurrent writes from the A and B threads. These logs make long-running local benchmarks observable, but they are not the durable benchmark artifact or the policy evidence contract. The future worker attaches or ingests them under the corresponding job.
+The logger serializes concurrent writes from the A and B threads. These logs make long-running local benchmarks observable, but they are not the benchmark artifact or the policy evidence contract. AgentCD includes their path in the corresponding benchmark result.
 
 ## Delivery Phases
 
@@ -390,17 +396,18 @@ The logger serializes concurrent writes from the A and B threads. These logs mak
 
 ### Phase 2: Greptile And Policy V1
 
-- Run Greptile before each code-changing attempt worktree is removed.
+- Integrate AgentCD with the single synchronous `POST /evaluations` endpoint before each paired attempt's worktrees and temporary refs are removed.
+- Send both exact generated commits in one request and retain both complete Greptile outputs.
 - Normalize baseline and candidate Greptile results with deterministic evaluator output.
 - Implement, version, and fixture-test the offline evaluation policy.
 - Return an explainable offline decision: promote to shadow, hold, reject, or require human review.
 
-### Phase 3: FastAPI And PR Checks
+### Phase 3: Evaluation Integration
 
-- Add durable persistence and a background worker.
-- Add asynchronous FastAPI job and result endpoints.
-- Invoke the CLI subprocess first, then move to direct service integration when the boundary is stable.
-- Validate GitHub webhooks, deduplicate deliveries, and publish offline evaluation checks on PRs.
+- Stabilize the one-endpoint request and response contract.
+- Add bounded HTTP timeout and retry behavior for evaluator infrastructure failures.
+- Pass the paired response into the evaluation function and include normalized evidence in AgentCD output.
+- Keep real Greptile smoke tests optional and use captured JSON fixtures in normal tests.
 
 ### Phase 4: Shadow And Progressive Routing
 
@@ -421,11 +428,12 @@ Required validation as the system grows:
 - Replay saved evidence to prove a policy version is deterministic.
 - Test prompt-suite validation, deduplication, fixture binding, and category coverage.
 - Test Greptile normalization with captured success, findings, timeout, authentication, and malformed-output fixtures.
-- Integration-test the worker flow with mock Codex and Greptile runners.
+- Integration-test the AgentCD-to-FastAPI flow with mock Codex and Greptile runners.
 - Verify every repeated attempt starts clean and temporary worktrees and branches are removed.
+- Verify AgentCD makes one evaluation request per paired attempt and keeps both exact refs alive until the response completes.
+- Verify one Greptile failure does not cancel or hide the other result.
 - Verify missing evaluator data cannot accidentally promote a candidate.
 - Verify a critical finding overrides improvements in speed or cost.
-- Verify GitHub webhook authentication and idempotency.
 - Keep real Codex and Greptile smoke tests optional so normal tests do not require credentials or external services.
 
 ## Open Decisions
@@ -434,6 +442,5 @@ Required validation as the system grows:
 - What deterministic success checks exist for each selected task?
 - Which Greptile JSON fields become the stable normalized evidence contract?
 - What are the initial non-inferiority margins, minimum paired samples, and observation windows?
-- Which durable queue or workflow system will execute jobs?
 - Which router or feature-flag system will own live traffic percentages?
 - Which rollout actions are automatic and which require human approval?
