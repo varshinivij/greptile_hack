@@ -21,10 +21,12 @@ This plan extends the code that is present today; it does not assume the FastAPI
 | Metrics | Token, duration, and tool counts are summarized with average, p50, and p90 | Add paired quality, reliability, evaluator, and policy evidence |
 | Tracing | A thread-safe JSONL logger records benchmark, worktree, version, and attempt progress | Attach trace artifacts to durable jobs and keep them distinct from policy evidence |
 | Output | JSON plus a Markdown comparison table, execution metadata, and log path | Add a schema version and named baseline/candidate records |
-| Tests | Five `unittest` tests cover metrics, the mock CLI flow, A/B concurrency, and fresh Codex invocation | Add attempt-isolation, artifact, evaluator, policy, and worker tests |
+| Human-readable report | `agentcd-report` accepts JSON, JSONL, or text benchmark data and asks an OpenAI model to produce a prose comparison and recommendation | Make it consume the policy decision and normalized evidence after evaluation; keep it advisory and package its prompt asset reliably |
+| Tests | Six `unittest` tests cover metrics, the mock CLI flow, trace redaction, A/B concurrency, and fresh Codex invocation | Add attempt-isolation, artifact, evaluator, policy, and worker tests |
 | Prompt data | Seed instructions and 1,000 synthetic prompt records exist | Curate runnable tasks and bind them to repositories, setup, and expected checks |
+| Documentation | A `hugoDocs` gitlink is present, but the repository has no `.gitmodules` mapping for it | Add and verify the submodule mapping before any workflow depends on the docs checkout |
 | FastAPI, persistence, and workers | Not present | Add after the benchmark evidence boundary is stable |
-| Greptile, policy, and routing | Not present | Add in separate, testable stages described below |
+| Greptile, deterministic policy, and routing | Not present; the prose report generator does not replace them | Add in separate, testable stages described below |
 
 The current tests pass with `python3 -m unittest discover -s tests`.
 
@@ -55,16 +57,53 @@ Do not send all 1,000 prompts into a rollout decision. Start with a representati
 
 ## Responsibility Boundaries
 
-The target system has six separate responsibilities:
+The target system has seven separate responsibilities:
 
 - **FastAPI control plane:** accepts API and GitHub webhook requests, validates them, creates durable jobs, returns status, and publishes results.
 - **Background worker:** owns the long-running workflow, retries, timeouts, cancellation, and cleanup. The HTTP request does not wait for a benchmark to finish.
 - **Benchmark CLI/service:** creates isolated worktrees, runs the baseline and candidate agents on the same tasks, captures artifacts, and keeps worktrees alive until worktree-dependent evaluation is complete.
 - **Evaluation pipeline:** runs deterministic checks and Greptile and normalizes their output into paired evidence.
 - **Evaluation policy:** consumes completed evidence and the current rollout stage, then returns a decision. It does not invoke agents, call Greptile, or mutate traffic.
+- **Human-readable report renderer:** optionally turns the policy decision and its supporting evidence into prose for a PR or operator. It may explain the decision but cannot replace, override, or authorize it.
 - **Rollout controller:** applies an approved decision to a router or feature-flag system. This remains separate from the policy.
 
 The current CLI treats versions A and B as neutral labels. The server API uses `candidate_ref` and `baseline_ref`. Its adapter deliberately maps candidate to `commit-a` and baseline to `commit-b`, then converts the CLI's A/B result into named candidate/baseline evidence before calling the policy. The server always supplies explicit refs and does not rely on the CLI's current `HEAD` and `master` defaults.
+
+## `hashim-eval` Branch Scope
+
+This branch owns the first mergeable evaluation-policy vertical slice. Its job is to turn already-normalized benchmark evidence into an explainable offline rollout decision.
+
+### Deliverables
+
+1. **Evidence contract:** define the versioned input the policy accepts. It uses named baseline/candidate roles and never relies on raw A/B ordering.
+2. **Policy configuration:** define versioned thresholds, required evaluators, required task segments, and non-inferiority margins outside the decision logic.
+3. **Pure policy evaluation:** apply ordered gates with no network, filesystem, database, clock, or routing side effects.
+4. **Decision report:** return a stable action, next stage, reason codes, gate results, observed values, thresholds, and missing evidence.
+5. **Fixtures and tests:** cover every decision path and prove the same evidence plus policy version always produces the same result.
+6. **Integration boundary:** expose one service-level policy entrypoint that a background worker can call after the benchmark and Greptile pipeline finishes.
+
+### Not Owned By This Branch
+
+- FastAPI endpoints, persistence, or the durable worker
+- Git worktree creation, cleanup, or attempt isolation
+- invoking Codex or Greptile
+- parsing live Greptile CLI output beyond agreeing on its normalized evidence shape
+- changing feature flags or production traffic percentages
+
+Those components supply evidence to or consume a decision from the policy. Keeping them outside the policy makes it possible to develop and fully test this branch with saved fixtures now.
+
+### Required Inputs From Other Work
+
+The policy contract needs these upstream guarantees:
+
+- the benchmark adapter names baseline and candidate explicitly
+- attempts have task, pair, version, and run identifiers
+- both sides used comparable source, prompt, model, and tool configuration
+- deterministic checks identify pass, fail, not applicable, or unavailable
+- Greptile results are normalized into completion status and findings by severity/category
+- operational metrics distinguish task failure from evaluator or runner infrastructure failure
+
+Missing upstream fields do not block policy development. Represent them in fixtures as incomplete evidence and verify that policy v1 returns `hold` instead of guessing.
 
 ## End-To-End Flow
 
@@ -97,6 +136,8 @@ flowchart TD
     Policy --> Decision["Promote, hold, reject,<br/>rollback, or human review"]
 
     Decision --> Result["Persist result and update PR check"]
+    Decision --> Report["Optional human-readable report<br/>advisory presentation only"]
+    Report --> Result
     Decision --> Rollout["Rollout controller<br/>when live routing exists"]
 ```
 
@@ -106,8 +147,9 @@ The exact call sequence is:
 2. A background worker invokes the benchmark CLI or service.
 3. The benchmark orchestration creates clean attempts, runs Codex, captures artifacts, and runs worktree-dependent evaluators before cleanup.
 4. The worker receives normalized evidence and calls the evaluation policy.
-5. The worker persists the policy decision and publishes it.
-6. A rollout controller may apply the decision after the relevant stage and authorization checks exist.
+5. The worker persists the policy decision as the authoritative result.
+6. The worker may invoke the report renderer with that decision and its supporting evidence, then publish both. A report failure does not change the decision.
+7. A rollout controller may apply the policy decision after the relevant stage and authorization checks exist. It never consumes a prose recommendation as authorization.
 
 If the worker shells out to the CLI, Greptile must run inside that CLI job before its worktrees disappear, and the CLI result must include normalized Greptile evidence. When the worker later calls `agentcd_bench.service` directly, the evaluator remains a separate component but shares the service-managed worktree lifetime.
 
@@ -194,18 +236,42 @@ Reference: [Greptile CLI documentation](https://www.greptile.com/docs/code-revie
 
 The evaluation policy is deterministic, versioned, replayable, and side-effect free. Given the same evidence and policy version, it produces the same decision. This allows policy development and testing to proceed against saved fixtures while the CLI artifact contract is being completed.
 
+### Contract Boundary
+
+The policy accepts normalized evidence, not raw CLI JSON, JSONL traces, Greptile output, worktree paths, database records, or prose from `agentcd-report`. Adapters validate and normalize external evaluator formats before invoking the policy. A generated report is downstream presentation and can never authorize promotion or rollback.
+
+Structurally invalid or unsupported input is a contract error and produces no rollout decision. Valid evidence that is incomplete or unavailable produces a `hold` decision with explicit missing-evidence reason codes unless the available evidence already contains a confirmed critical safety failure.
+
 ### Inputs
 
+- evidence schema version and policy version
 - baseline and candidate version identifiers
 - current rollout stage
-- task-suite version and paired observations
-- deterministic task results
-- normalized Greptile results for both versions when applicable
-- reliability, latency, token, cost, and tool-use metrics
-- sample count, observation duration, and important task or traffic segments
+- task-suite version, required segments, and paired observations
+- per-task deterministic results for both sides
+- normalized Greptile status and findings for both sides when applicable
+- execution status, latency, token, cost, and tool-use metrics
+- sample count, observation duration, and segment coverage
 - previous rollout windows and decisions when evaluating live traffic
 - the candidate's declared objective, such as quality, cost, or latency
-- policy version and configured thresholds
+- a complete snapshot of configured policy thresholds
+
+### Policy Configuration
+
+Policy behavior is data-driven and versioned. Configuration includes:
+
+- policy identifier, version, and supported stage
+- required evidence schema version
+- required evaluators by task output type
+- required task categories or traffic segments
+- minimum paired samples and observation duration
+- critical Greptile severities and forbidden policy violations
+- reliability limits and baseline-relative regression margins
+- quality non-inferiority margins
+- token, duration, cost, and tool-use guardrails
+- rules for when an otherwise valid result needs human review
+
+Development fixtures may provide explicit temporary thresholds. Automatic promotion cannot use guessed production defaults; those thresholds must be calibrated from repeated baseline data and reviewed.
 
 ### Decisions
 
@@ -215,20 +281,51 @@ The evaluation policy is deterministic, versioned, replayable, and side-effect f
 - **Rollback:** a candidate already serving traffic crossed a rollback boundary.
 - **Human review:** evidence is valid but the configured policy cannot safely decide automatically.
 
-Every result includes the current stage, proposed next stage, machine-readable reason codes, a human-readable explanation, evaluated metrics, thresholds, sample size, failed gates, and policy version.
+Every result includes the current stage, proposed next stage, machine-readable reason codes, a human-readable explanation, every gate result, observed values, thresholds, sample and segment coverage, missing evidence, and policy version.
+
+Stable reason-code families include:
+
+- `EVIDENCE_INCOMPLETE` and `EVIDENCE_INCOMPARABLE`
+- `SAMPLE_TOO_SMALL` and `SEGMENT_COVERAGE_MISSING`
+- `CRITICAL_FINDING` and `FORBIDDEN_SIDE_EFFECT`
+- `RELIABILITY_REGRESSION` and `QUALITY_REGRESSION`
+- `EFFICIENCY_GUARDRAIL_FAILED`
+- `MANUAL_REVIEW_REQUIRED`
+- `ALL_GATES_PASSED`
 
 ### Ordered Gates
 
 Do not collapse all signals into one weighted score. Apply gates in order so low cost or latency cannot compensate for unsafe or incorrect work.
 
-1. **Evidence validity:** paired inputs are comparable, required evaluators completed, telemetry is intact, the suite is valid, and required artifacts exist.
-2. **Safety:** no critical security issue, forbidden side effect, secret leak, or prohibited tool behavior.
-3. **Reliability:** failures, timeouts, malformed results, and tool errors remain within absolute and baseline-relative limits.
-4. **Quality non-inferiority:** the candidate is not worse than the baseline beyond a configured margin. Deterministic task outcomes take priority over model-based review signals.
-5. **Declared objective:** after guardrails pass, the candidate demonstrates the quality, cost, or latency improvement it was intended to make.
-6. **Evidence sufficiency:** the stage's minimum sample size and observation period have been reached. Otherwise the decision is hold.
+1. **Evidence validity:** the schema is supported, paired inputs are comparable, telemetry is internally consistent, and the suite and artifact references are valid.
+2. **Safety:** no critical security issue, forbidden side effect, secret leak, or prohibited tool behavior. A confirmed critical failure can reject immediately even before the normal sample minimum is reached.
+3. **Evidence completeness and sufficiency:** required evaluators completed and minimum paired samples, required segments, and observation duration are present. Otherwise the decision is hold.
+4. **Reliability:** failures, timeouts, malformed results, and tool errors remain within absolute and baseline-relative limits.
+5. **Quality non-inferiority:** the candidate is not worse than the baseline beyond a configured margin. Deterministic task outcomes take priority over Greptile or other model-based signals.
+6. **Declared objective and efficiency:** after all guardrails pass, the candidate demonstrates the quality, cost, latency, or tool-use improvement it was intended to make.
 
 Critical safety failures cause immediate rejection or rollback. Small or statistically unclear regressions hold for more evidence. Missing observability freezes promotion.
+
+Decision precedence for policy v1 is:
+
+1. reject malformed input at the contract boundary
+2. reject a confirmed critical safety failure visible in otherwise valid evidence
+3. hold valid but incomplete evidence
+4. hold insufficient samples or segment coverage
+5. reject a required reliability or quality guardrail failure
+6. request human review for valid but conflicting or unsupported evidence
+7. promote only when every required gate passes
+
+### Comparison Rules
+
+- Compare baseline and candidate within the same task pair before aggregating across tasks.
+- Treat missing metrics as missing evidence, never as zero.
+- Keep runner, evaluator, and task failures distinct; they have different policy meaning.
+- Evaluate both overall results and every required category or segment so a large easy segment cannot hide a critical regression elsewhere.
+- Use both absolute limits and baseline-relative margins where configured.
+- Keep Greptile severity counts visible instead of converting all findings into one opaque score.
+- Report distribution summaries, but do not promote from an average alone when tail latency, error rate, or a critical segment violates a guardrail.
+- Hold when sample size is too small to support the configured comparison; do not manufacture statistical confidence.
 
 ### Initial Offline Policy Scope
 
@@ -244,6 +341,61 @@ The first policy uses:
 - minimum paired sample counts across required task categories
 
 Exact thresholds remain configuration and must be calibrated using repeated baseline runs before automatic promotion is enabled.
+
+`rollback` remains part of the long-term decision vocabulary but is not emitted by the offline-only v1 policy.
+
+### `hashim-eval` Implementation Order
+
+1. Define the versioned normalized-evidence, policy-configuration, gate-result, and decision-report contracts.
+2. Create small saved fixtures for a healthy baseline/candidate pair, incomplete evidence, a critical Greptile finding, a quality regression, and an efficiency regression.
+3. Implement each gate independently with explicit observed values and thresholds.
+4. Implement the policy coordinator that applies the documented precedence and collects all explainability data.
+5. Add stable reason codes and a deterministic summary derived only from the decision data; this remains the canonical explanation even if an optional model-written report is unavailable.
+6. Expose one synchronous service entrypoint for the future background worker and document the contract.
+
+The first merge does not need live Codex, Greptile, FastAPI, or database access. Fixture-driven policy behavior is the deliverable.
+
+### Required Policy Test Matrix
+
+- identical valid evidence produces identical serialized decisions
+- complete non-inferior candidate evidence promotes to shadow
+- missing required Greptile evidence holds
+- insufficient paired samples or category coverage holds
+- incomparable task, model, source, or tool configuration holds
+- any configured critical Greptile finding rejects
+- forbidden side effects reject regardless of speed or token savings
+- reliability regression rejects
+- deterministic quality regression rejects even if Greptile is clean
+- efficiency regression rejects only after safety, reliability, and quality gates are valid
+- conflicting but valid evaluator signals request human review when configured
+- exact threshold-boundary behavior is tested explicitly
+- unknown evidence or policy versions fail contract validation rather than silently falling back
+
+### Branch Definition Of Done
+
+- Saved fixtures can exercise every policy action supported by offline v1.
+- Every decision is schema-versioned, serializable, explainable, and deterministic.
+- Every required gate exposes its status, observed value, threshold, and reason code.
+- The policy performs no external I/O and has no dependency on FastAPI, Git, Codex, Greptile, or a database client.
+- Contract errors are distinguishable from valid `hold`, `reject`, and `human review` decisions.
+- The integration contract explains exactly what the benchmark and Greptile pipelines must supply.
+- All policy tests and the existing CLI test suite pass.
+
+## Human-Readable Reports
+
+The repository now includes `agentcd-report`, which accepts arbitrary JSON, JSONL, or text input, loads guidance from `.claude/skills/agent-report/SKILL.md`, calls an OpenAI model, and writes a prose comparison. This is useful for operators, but its model-generated recommendation is nondeterministic and is not the evaluation policy.
+
+Before it is used by FastAPI or a PR check:
+
+- run it after the deterministic policy, never before or instead of the policy
+- give it the schema-versioned decision report and normalized supporting evidence rather than an untyped data dump
+- require it to preserve the policy action, stage, reason codes, observed values, and thresholds without inventing missing evidence
+- label its prose as explanatory and keep the deterministic decision visible beside it
+- persist the report model, prompt version, generation status, and output for auditability
+- publish the policy decision even when report generation times out or fails
+- make the report prompt available reliably when the package is installed outside a source checkout
+
+The rollout controller reads only the structured policy decision. Neither a report recommendation nor a report-generation failure can change traffic.
 
 ## FastAPI And Background Jobs
 
@@ -375,8 +527,10 @@ The logger serializes concurrent writes from the A and B threads. These logs mak
 - Ephemeral Codex sessions with closed stdin.
 - Token, duration, and tool metrics with JSON and table output.
 - Thread-safe JSONL progress tracing.
-- Five passing unit/integration-style tests.
+- Six passing unit/integration-style tests.
 - Synthetic prompt catalog and one prompt/instruction example.
+- An optional OpenAI-backed `agentcd-report` command and report-writing skill; its current prose recommendation is advisory, not policy output.
+- A `hugoDocs` gitlink that still needs a valid `.gitmodules` mapping before it can be relied on as a submodule.
 - A safe-push helper for synchronizing and pushing a branch without rewriting remote history.
 
 ### Phase 1: Trustworthy Offline Evidence
@@ -388,19 +542,20 @@ The logger serializes concurrent writes from the A and B threads. These logs mak
 - Add temporary per-attempt branches and commits for evaluation without pushing them.
 - Preserve current A/B concurrency and the CLI as the human-facing wrapper.
 
-### Phase 2: Greptile And Policy V1
+### Phase 2: Greptile Evidence And Policy V1
 
-- Run Greptile before each code-changing attempt worktree is removed.
-- Normalize baseline and candidate Greptile results with deterministic evaluator output.
-- Implement, version, and fixture-test the offline evaluation policy.
+- The Greptile integration runs before each code-changing attempt worktree is removed and produces normalized evidence.
+- The `hashim-eval` work defines the normalized evidence contract and implements the versioned offline policy against saved fixtures in parallel.
+- Once both sides are ready, connect normalized baseline/candidate Greptile and deterministic evidence to the policy entrypoint.
 - Return an explainable offline decision: promote to shadow, hold, reject, or require human review.
+- Adapt `agentcd-report` to render that structured decision downstream without becoming a second decision engine.
 
 ### Phase 3: FastAPI And PR Checks
 
 - Add durable persistence and a background worker.
 - Add asynchronous FastAPI job and result endpoints.
 - Invoke the CLI subprocess first, then move to direct service integration when the boundary is stable.
-- Validate GitHub webhooks, deduplicate deliveries, and publish offline evaluation checks on PRs.
+- Validate GitHub webhooks, deduplicate deliveries, and publish the structured offline decision plus an optional human-readable report on PRs.
 
 ### Phase 4: Shadow And Progressive Routing
 
@@ -413,7 +568,7 @@ The logger serializes concurrent writes from the A and B threads. These logs mak
 
 Current validation:
 
-- `python3 -m unittest discover -s tests` runs five tests and passes.
+- `python3 -m unittest discover -s tests` runs six tests and passes.
 
 Required validation as the system grows:
 
@@ -425,6 +580,9 @@ Required validation as the system grows:
 - Verify every repeated attempt starts clean and temporary worktrees and branches are removed.
 - Verify missing evaluator data cannot accidentally promote a candidate.
 - Verify a critical finding overrides improvements in speed or cost.
+- Verify report output cannot alter a policy decision or authorize a rollout.
+- Verify the structured decision is still persisted and published when report generation fails.
+- Verify report input and output preserve policy reason codes, observed values, and thresholds.
 - Verify GitHub webhook authentication and idempotency.
 - Keep real Codex and Greptile smoke tests optional so normal tests do not require credentials or external services.
 
@@ -437,3 +595,5 @@ Required validation as the system grows:
 - Which durable queue or workflow system will execute jobs?
 - Which router or feature-flag system will own live traffic percentages?
 - Which rollout actions are automatic and which require human approval?
+- Which model and prompt version will render operator reports, and what cost and latency budget applies?
+- Should `hugoDocs` be configured as a real submodule or replaced with repository-owned documentation?
