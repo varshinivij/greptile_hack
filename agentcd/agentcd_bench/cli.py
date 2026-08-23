@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .codex_client import CodexExecRunner, MockCodexRunner
@@ -25,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="Optional Codex model name.")
     parser.add_argument("--keep-worktrees", action="store_true", help="Keep temp worktrees after the run.")
     parser.add_argument("--json-only", action="store_true", help="Only print JSON, without the comparison table.")
+    parser.add_argument(
+        "--log-file",
+        help="Path for JSONL trace logs. Defaults to logs/agents-bench-<timestamp>.jsonl.",
+    )
     parser.add_argument(
         "--runner",
         choices=["codex", "mock"],
@@ -61,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         prompt=read_prompt(args),
         runs=args.runs,
         keep_worktrees=args.keep_worktrees,
+        log_file=resolve_log_file(args.log_file),
     )
 
     try:
@@ -74,3 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print(comparison_table(result))
     return 0
+
+
+def resolve_log_file(log_file: str | None) -> Path:
+    if log_file:
+        return Path(log_file).expanduser().resolve()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return (Path.cwd() / "logs" / f"agents-bench-{timestamp}.jsonl").resolve()

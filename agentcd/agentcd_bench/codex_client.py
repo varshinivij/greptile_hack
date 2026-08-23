@@ -19,13 +19,20 @@ class CodexExecRunner:
     model: str | None = None
 
     def run(self, cwd: Path, prompt: str) -> dict[str, Any]:
-        cmd = [self.command, "exec", "--json", "--cd", str(cwd)]
+        cmd = [self.command, "exec", "--json", "--ephemeral", "--cd", str(cwd)]
         if self.model:
             cmd.extend(["--model", self.model])
         cmd.append(prompt)
 
         start = time.monotonic()
-        proc = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False)
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         duration_ms = round((time.monotonic() - start) * 1000)
         parsed = parse_codex_jsonl(proc.stdout)
 

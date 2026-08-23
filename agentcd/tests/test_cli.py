@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agentcd_bench.cli import main
+from agentcd_bench.codex_client import CodexExecRunner
 from agentcd_bench.metrics import percentile, summarize_attempts
+from agentcd_bench.service import BenchmarkConfig, run_benchmark
 
 
 class MetricsTest(unittest.TestCase):
@@ -55,6 +60,8 @@ class CliTest(unittest.TestCase):
                     "--runner",
                     "mock",
                     "--json-only",
+                    "--log-file",
+                    str(Path(temp) / "bench.jsonl"),
                 ]
             )
 
@@ -65,6 +72,59 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result["runs"][0]["commit"], commit_a)
             self.assertEqual(result["runs"][1]["commit"], commit_b)
             self.assertIn("tool_call_count", result["runs"][0]["summary"])
+            self.assertTrue(result["execution"]["version_runs_concurrent"])
+
+
+class OrchestrationTest(unittest.TestCase):
+    def test_versions_run_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            init_fixture_repo(project)
+            commit_a = git(project, "rev-parse", "HEAD").strip()
+            write_file(project / "AGENTS.md", "# Agent B\n\nUse deeper repository analysis.\n")
+            git(project, "add", "AGENTS.md")
+            git(project, "commit", "-m", "agent b")
+            commit_b = git(project, "rev-parse", "HEAD").strip()
+
+            runner = OverlapDetectingRunner()
+            result = run_benchmark(
+                BenchmarkConfig(
+                    project=project,
+                    commit_a=commit_a,
+                    commit_b=commit_b,
+                    prompt="Explain the codebase.",
+                    runs=1,
+                ),
+                runner,
+            )
+
+            self.assertEqual(len(result["runs"]), 2)
+            self.assertGreaterEqual(runner.max_active, 2)
+
+
+class CodexRunnerTest(unittest.TestCase):
+    def test_codex_exec_uses_fresh_context_and_closed_stdin(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with patch("agentcd_bench.codex_client.subprocess.run", return_value=completed) as run:
+            CodexExecRunner(command="codex", model="gpt-test").run(Path("/tmp/worktree"), "hello")
+
+        args, kwargs = run.call_args
+        self.assertEqual(
+            args[0],
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--ephemeral",
+                "--cd",
+                "/tmp/worktree",
+                "--model",
+                "gpt-test",
+                "hello",
+            ],
+        )
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
 
 
 def init_fixture_repo(project: Path) -> None:
@@ -100,6 +160,40 @@ def capture_stdout(args: list[str]) -> str:
     if exit_code != 0:
         raise AssertionError(f"CLI exited with {exit_code}")
     return buffer.getvalue()
+
+
+class OverlapDetectingRunner:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
+
+    def run(self, cwd: Path, prompt: str) -> dict[str, object]:
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.1)
+            return {
+                "status": "success",
+                "llm_metrics": {
+                    "model": "overlap-test",
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "reasoning_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "duration_ms": 100,
+                },
+                "tool_metrics": {
+                    "tool_call_count": 0,
+                    "tool_calls": [],
+                },
+                "returncode": 0,
+            }
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 if __name__ == "__main__":
