@@ -1,0 +1,1 @@
+Investigate how dashboard panel query execution is wired through this codebase. Then implement a small bugfix so canceled panel queries do not update visible panel state after cancellation. Add the narrowest useful tests and summarize the validation commands.
