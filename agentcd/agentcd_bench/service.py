@@ -185,9 +185,6 @@ def run_benchmark(config: BenchmarkConfig, runner: Runner) -> dict[str, Any]:
                     "evaluation_service": config.evaluator_url,
                 },
                 "evaluations": evaluations,
-                "evidence": evidence_payload,
-                "decision": decision_payload,
-                "decision_markdown": decision_markdown,
                 "runs": [
                     {
                         "version": "a",
@@ -205,6 +202,14 @@ def run_benchmark(config: BenchmarkConfig, runner: Runner) -> dict[str, Any]:
                     },
                 ],
             }
+            if evidence_payload is not None:
+                result.update(
+                    {
+                        "evidence": evidence_payload,
+                        "decision": decision_payload,
+                        "decision_markdown": decision_markdown,
+                    }
+                )
             logger.event("result_created", level="debug", run_count=config.runs, versions=2)
             logger.event("benchmark_end", status="success")
             return result

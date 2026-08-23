@@ -227,10 +227,13 @@ def _normalize_greptile(
         return GreptileEvidence(status=EvaluatorStatus.UNAVAILABLE, findings=())
 
     findings: list[GreptileFinding] = []
-    for index, value in enumerate(comments):
-        finding = _normalize_finding(value, f"{path}.greptile_output.comments[{index}]")
+    for value in comments:
+        finding = _normalize_finding(value)
         if finding is None:
-            return GreptileEvidence(status=EvaluatorStatus.UNAVAILABLE, findings=())
+            return GreptileEvidence(
+                status=EvaluatorStatus.UNAVAILABLE,
+                findings=tuple(findings),
+            )
         findings.append(finding)
     return GreptileEvidence(
         status=EvaluatorStatus.COMPLETED,
@@ -238,7 +241,7 @@ def _normalize_greptile(
     )
 
 
-def _normalize_finding(value: object, path: str) -> GreptileFinding | None:
+def _normalize_finding(value: object) -> GreptileFinding | None:
     if not isinstance(value, Mapping):
         return None
     finding_id = value.get("id")

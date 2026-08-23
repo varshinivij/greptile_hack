@@ -13,7 +13,11 @@ from agentcd_bench.cli import main
 from agentcd_bench.codex_client import CodexExecRunner, parse_codex_jsonl
 from agentcd_bench.metrics import percentile, summarize_attempts
 from agentcd_bench.output import compact_result
-from agentcd_bench.service import BenchmarkConfig, run_benchmark
+from agentcd_bench.service import (
+    BenchmarkConfig,
+    resolve_source_revisions,
+    run_benchmark,
+)
 
 
 class MetricsTest(unittest.TestCase):
@@ -426,6 +430,33 @@ class CliTest(unittest.TestCase):
 
 
 class OrchestrationTest(unittest.TestCase):
+    def test_source_revision_is_shared_only_when_commits_differ_by_agents_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp) / "repo"
+            init_fixture_repo(project)
+            baseline = git(project, "rev-parse", "HEAD").strip()
+            write_file(project / "AGENTS.md", "# Candidate\n")
+            git(project, "add", "AGENTS.md")
+            git(project, "commit", "-m", "candidate agents")
+            candidate = git(project, "rev-parse", "HEAD").strip()
+
+            candidate_source, baseline_source = resolve_source_revisions(
+                project, candidate, baseline
+            )
+
+            self.assertEqual(candidate_source, baseline_source)
+
+            write_file(project / "README.md", "# Different source\n")
+            git(project, "add", "README.md")
+            git(project, "commit", "-m", "source change")
+            source_changed = git(project, "rev-parse", "HEAD").strip()
+
+            candidate_source, baseline_source = resolve_source_revisions(
+                project, source_changed, baseline
+            )
+
+            self.assertNotEqual(candidate_source, baseline_source)
+
     def test_versions_run_concurrently(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = Path(temp) / "repo"

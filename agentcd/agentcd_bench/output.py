@@ -42,11 +42,11 @@ def compact_result(result: dict[str, Any]) -> dict[str, Any]:
         "run_count": result.get("run_count"),
         "log_file": result.get("log_file"),
         "execution": result.get("execution"),
-        "evidence": result.get("evidence"),
-        "decision": result.get("decision"),
-        "decision_report": result.get("decision_report"),
         "runs": [],
     }
+    for field in ("evidence", "decision", "decision_report"):
+        if field in result:
+            compact[field] = result[field]
     for run in result.get("runs", []):
         compact_attempts = []
         for attempt in run.get("attempts", []):

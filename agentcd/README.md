@@ -127,6 +127,33 @@ python -m agentcd_bench \
 
 AgentCD resets each evaluated attempt to its starting commit, captures its patch and changed files, creates an unpushed temporary commit and branch, calls `POST /evaluations` once for the candidate/baseline pair, includes the complete response under `evaluations`, and deletes the temporary branches after the response returns.
 
+Add an explicit policy configuration to connect the benchmark, Greptile, and
+deterministic decision in one invocation. Version A is the candidate and version
+B is the baseline:
+
+```bash
+python -m agentcd_bench \
+  --project /path/to/repo \
+  --commit-a candidate-sha \
+  --commit-b baseline-sha \
+  --prompt-file examples/grafana-like-codebase/prompt.txt \
+  --runner codex \
+  --evaluator-url http://127.0.0.1:8000 \
+  --policy-config /path/to/offline-policy.json \
+  --task-id hugodocs-bug-fix-1 \
+  --suite-version hugodocs-demo-suite/v1 \
+  --segment bug_fixing \
+  --objective total_tokens \
+  --decision-report decision.md
+```
+
+This path returns normalized `agentcd.evaluation.evidence/v1` and the canonical
+structured decision in compact CLI JSON; add `--verbose` to include the raw
+evaluator response as well. It also writes the deterministic Markdown decision
+report. If `--decision-report` is omitted, the report is written beside the JSONL
+trace log. There is intentionally no default policy: thresholds must come from
+the supplied versioned policy snapshot.
+
 The `codex` runner shells out to `codex exec --json --ephemeral --sandbox workspace-write --cd <worktree>`, closes inherited stdin, parses JSONL events when available, and always records status and wall-clock duration.
 
 Generate verbose machine-readable benchmark output for `agentcd-report`:

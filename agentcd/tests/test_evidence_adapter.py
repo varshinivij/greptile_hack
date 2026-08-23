@@ -82,6 +82,33 @@ class EvidenceAdapterTest(unittest.TestCase):
             EvaluatorStatus.UNAVAILABLE,
         )
 
+    def test_preserves_confirmed_findings_when_a_later_comment_is_malformed(self) -> None:
+        raw = evaluation_pair(candidate_severity="P0")
+        raw["result"]["evaluations"]["a"]["greptile_output"]["comments"].append(
+            {"unexpected": "comment"}
+        )
+
+        evidence = build_evaluation_evidence(
+            raw_evaluations=[raw],
+            candidate_attempts=[attempt("candidate-commit")],
+            baseline_attempts=[attempt("baseline-commit")],
+            candidate_version="candidate-agents",
+            baseline_version="baseline-agents",
+            candidate_source_revision="shared-source",
+            baseline_source_revision="shared-source",
+            prompt_hash="prompt-sha",
+            task_id="task-1",
+            suite_version="suite/v1",
+            segment="general",
+            output_type=OutputType.CODE,
+            runner="codex-cli/v1",
+            tool_policy="workspace-write/v1",
+        )
+
+        greptile = evidence.pairs[0].candidate.greptile
+        self.assertEqual(greptile.status, EvaluatorStatus.UNAVAILABLE)
+        self.assertEqual(greptile.findings[0].severity, FindingSeverity.CRITICAL)
+
     def test_rejects_evaluator_result_for_the_wrong_attempt_commit(self) -> None:
         raw = evaluation_pair()
         raw["result"]["evaluations"]["a"]["commit_id"] = "wrong-commit"
